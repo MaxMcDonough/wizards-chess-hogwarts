@@ -1479,14 +1479,14 @@
   <!-- <a-entity stone-chamber></a-entity> -->
 
   <!-- Subtle stone platform under the board (just a touch of bedding) -->
-  <a-entity position="0 -0.05 0">
+  <a-entity id="outdoorPlatform" position="0 -0.05 0">
     <a-box width="22" height="0.1" depth="22"
       material="color:#0a0a12; roughness:0.95; metalness:0.02"
       shadow="receive:true"></a-box>
   </a-entity>
 
   <!-- Dark ground beneath everything -->
-  <a-plane position="0 -0.55 0" rotation="-90 0 0" width="250" height="250"
+  <a-plane id="outdoorGround" position="0 -0.55 0" rotation="-90 0 0" width="250" height="250"
     material="color:#040410; roughness:0.92; metalness:0.02"
     shadow="receive:true"></a-plane>
 
@@ -2052,9 +2052,15 @@
     document.querySelectorAll('[id^="wp-"],[id^="bp-"],[id^="dr-"],[id^="lr-"],[id^="dk-"],[id^="lk-"],[id^="db-"],[id^="lb-"],#dq,#lq,#dk,#lk-king').forEach(function(e){
       e.object3D.visible = false;
     });
-    // hide starfield, night sky, and outdoor braziers/lights so they don't bleed into the chamber
+    // hide starfield, night sky, outdoor platform/ground, and outdoor braziers/lights so they don't bleed into the chamber
     var stars = document.querySelector('[starfield]'); if (stars) stars.object3D.visible = false;
     var sky = document.querySelector('a-sky'); if (sky) sky.object3D.visible = false;
+    var outPlat = document.getElementById('outdoorPlatform'); if (outPlat) outPlat.object3D.visible = false;
+    var outGround = document.getElementById('outdoorGround'); if (outGround) outGround.object3D.visible = false;
+    // Also hide the distant moon + its backlight so no stray light bleed
+    document.querySelectorAll('a-scene > a-entity').forEach(function(e){
+      if (e.querySelector('a-sphere[material*="E4E9F2"]')) e.object3D.visible = false;
+    });
     var chamber = document.getElementById('stoneChamber');
     document.querySelectorAll('[brazier]').forEach(function(e){
       if (chamber && !chamber.contains(e)) e.object3D.visible = false;
