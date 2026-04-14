@@ -1368,9 +1368,11 @@
       background:linear-gradient(90deg,transparent,rgba(230,180,110,.5),transparent);
     }
 
-    /* ═══ NARRATIVE CAPTIONS during the chess game ═══ */
+    /* ═══ NARRATIVE CAPTIONS during the chess game ═══
+       Positioned in the upper-third so they never share vertical space with
+       the HUD at the bottom. */
     .caption{
-      position:fixed;left:50%;bottom:24%;transform:translateX(-50%);
+      position:fixed;left:50%;top:28%;transform:translateX(-50%);
       z-index:200;color:#d6c59a;
       font-family:'Cormorant Garamond',Georgia,serif;
       font-size:1.15rem;letter-spacing:.18em;text-transform:uppercase;
@@ -1381,9 +1383,9 @@
       max-width:80vw;
     }
     .caption.show{opacity:1}
-    /* Hide the controls HUD whenever a narrative caption is showing so the two
-       never overlap at the bottom of the screen. */
-    body:has(.caption.show) #hud{opacity:0 !important;transition:opacity .5s ease}
+    /* HUD fades out whenever the caption is active (driven by JS to toggle
+       the .hide-for-caption class — more reliable than CSS :has()). */
+    #hud.hide-for-caption{opacity:0 !important;transition:opacity .5s ease}
     .caption .whisper{
       display:block;margin-top:.4em;font-size:.72rem;
       letter-spacing:.32em;opacity:.55;font-style:italic;
@@ -2011,7 +2013,13 @@
   function showCaption(line, whisper, dur){
     cap.innerHTML = line + (whisper ? '<span class="whisper">' + whisper + '</span>' : '');
     cap.classList.add('show');
-    setTimeout(function(){ cap.classList.remove('show'); }, dur || 3500);
+    // Hide the HUD while a narrative line is showing so they never overlap
+    var hudEl = document.getElementById('hud');
+    if (hudEl) hudEl.classList.add('hide-for-caption');
+    setTimeout(function(){
+      cap.classList.remove('show');
+      if (hudEl) hudEl.classList.remove('hide-for-caption');
+    }, dur || 3500);
   }
 
   document.addEventListener('start-chess', function(){
