@@ -82,6 +82,64 @@
     });
 
     /* ════════════════════════════════════════════
+       VR THUMBSTICK LOCOMOTION — reads WebXR gamepads
+       Left stick: smooth walk (camera-forward relative).
+       Right stick: snap-free horizontal turn.
+       Only runs while the player is in VR mode so it doesn't
+       interfere with wasd-controls on desktop.
+       ════════════════════════════════════════════ */
+    AFRAME.registerComponent('vr-thumbstick-move', {
+      schema: {
+        speed:     {default: 3.0},   // metres per second
+        turnSpeed: {default: 90},    // degrees per second
+        deadzone:  {default: 0.12}
+      },
+      init: function(){
+        this._fwd   = new THREE.Vector3();
+        this._right = new THREE.Vector3();
+        this._up    = new THREE.Vector3(0, 1, 0);
+        this._camQ  = new THREE.Quaternion();
+      },
+      tick: function(t, dt){
+        var sceneEl = this.el.sceneEl;
+        if (!sceneEl.is || !sceneEl.is('vr-mode')) return;     // desktop path untouched
+        var session = sceneEl.xrSession || (sceneEl.renderer && sceneEl.renderer.xr && sceneEl.renderer.xr.getSession && sceneEl.renderer.xr.getSession());
+        if (!session || !session.inputSources) return;
+        if (this.el.components.flyover && this.el.components.flyover.active) return;  // don't fight the flyover
+
+        var dts = Math.min(0.1, (dt || 16) / 1000);
+        var dead = this.data.deadzone;
+        var rig = this.el;
+        var cam = rig.querySelector('a-camera');
+        if (!cam) return;
+
+        for (var i = 0; i < session.inputSources.length; i++){
+          var src = session.inputSources[i];
+          if (!src.gamepad || !src.gamepad.axes) continue;
+          var axes = src.gamepad.axes;
+          // Most WebXR controllers expose the main thumbstick on axes[2]/axes[3].
+          // axes[0]/axes[1] are reserved for the trackpad (legacy) on some devices.
+          var ax = axes.length >= 4 ? axes[2] : (axes[0] || 0);
+          var ay = axes.length >= 4 ? axes[3] : (axes[1] || 0);
+
+          if (src.handedness === 'left') {
+            if (Math.abs(ax) < dead && Math.abs(ay) < dead) continue;
+            cam.object3D.getWorldQuaternion(this._camQ);
+            this._fwd.set(0, 0, -1).applyQuaternion(this._camQ); this._fwd.y = 0; this._fwd.normalize();
+            this._right.crossVectors(this._fwd, this._up);
+            var m = this.data.speed * dts;
+            rig.object3D.position.addScaledVector(this._fwd,  -ay * m);
+            rig.object3D.position.addScaledVector(this._right, ax * m);
+          } else if (src.handedness === 'right') {
+            if (Math.abs(ax) < dead) continue;
+            var rad = this.data.turnSpeed * Math.PI / 180 * dts;
+            rig.object3D.rotation.y -= ax * rad;
+          }
+        }
+      }
+    });
+
+    /* ════════════════════════════════════════════
        BOUNDARY — keeps player inside play area
        ════════════════════════════════════════════ */
     AFRAME.registerComponent('boundary', {
@@ -1388,11 +1446,29 @@
     }
 
     #hud{
-      position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:100;
-      font-family:Georgia,serif;color:rgba(140,160,180,.5);font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;
-      background:rgba(0,0,0,.55);padding:8px 20px;border-radius:3px;
-      backdrop-filter:blur(6px);border:1px solid rgba(140,160,140,.06);
-      opacity:0;transition:opacity 2s ease;
+      position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:100;
+      font-family:Georgia,serif;color:rgba(200,210,220,.82);
+      background:rgba(0,0,0,.62);padding:10px 22px;border-radius:5px;
+      backdrop-filter:blur(8px);border:1px solid rgba(230,180,110,.18);
+      opacity:0;transition:opacity 1.2s ease;
+      max-width:min(92vw, 820px);text-align:center;
+      box-shadow:0 4px 20px rgba(0,0,0,.45);
+    }
+    #hud .hud-row{
+      display:flex;gap:22px;justify-content:center;flex-wrap:wrap;
+      font-size:.72rem;letter-spacing:.08em;line-height:1.5;
+    }
+    #hud .hud-block{display:flex;flex-direction:column;align-items:center;min-width:200px}
+    #hud .hud-label{
+      font-size:.58rem;letter-spacing:.22em;text-transform:uppercase;
+      color:rgba(230,180,110,.85);margin-bottom:4px;font-family:'Inter',sans-serif;font-weight:600;
+    }
+    #hud .hud-line{color:rgba(220,228,235,.88)}
+    #hud .hud-line b{color:#ffd080;font-weight:600}
+    #hud .divider{width:1px;background:rgba(230,180,110,.2);margin:2px 0}
+    @media(max-width:640px){
+      #hud .hud-row{flex-direction:column;gap:10px}
+      #hud .divider{display:none}
     }
     #hud.fade{opacity:0!important;pointer-events:none}
     #vig{position:fixed;inset:0;z-index:50;pointer-events:none;
@@ -1430,16 +1506,29 @@
   <iframe id="portal-iframe" allow="autoplay; fullscreen; xr-spatial-tracking" allowfullscreen></iframe>
 </div>
 <div id="vig"></div>
-<div id="hud">WASD move · Mouse look · Q up · E down</div>
+<div id="hud">
+  <div class="hud-row">
+    <div class="hud-block">
+      <div class="hud-label">Laptop &middot; Mouse + Keyboard</div>
+      <div class="hud-line"><b>WASD</b> walk &middot; <b>Mouse</b> look &middot; <b>Q / E</b> up / down &middot; <b>Click door</b> to enter</div>
+    </div>
+    <div class="divider"></div>
+    <div class="hud-block">
+      <div class="hud-label">VR Headset &middot; Quest Controllers</div>
+      <div class="hud-line"><b>Left stick</b> walk &middot; <b>Right stick</b> turn &middot; <b>Point + trigger</b> on a door to enter</div>
+    </div>
+  </div>
+</div>
 
 <a-scene
   renderer="antialias:true; colorManagement:true; physicallyCorrectLights:true"
-  vr-mode-ui="enabled:false"
+  vr-mode-ui="enabled:true; enterVRButton:''"
   loading-screen="enabled:false"
   fog="type:exponential; color:#020210; density:0.0025"
   shadow="type:pcfsoft"
   render-setup
   chess-game
+  webxr="requiredFeatures:local-floor; optionalFeatures:bounded-floor,hand-tracking"
 >
   <a-assets timeout="45000">
     <a-asset-item id="castle-glb" src="hogwarts_ny7.glb"></a-asset-item>
@@ -1673,6 +1762,7 @@
     wasd-controls="acceleration:22; fly:true; enabled:false"
     fly-controls="speed:10"
     flyover
+    vr-thumbstick-move="speed:3.2; turnSpeed:95"
     boundary="minX:-30; maxX:30; minZ:-30; maxZ:30; minY:0.5; maxY:20">
     <a-camera look-controls="pointerLockEnabled:false; magicWindowTrackingEnabled:false; enabled:false"
       fov="65" near="0.1" far="500">
@@ -1681,6 +1771,14 @@
         geometry="primitive: ring; radiusInner: 0.008; radiusOuter: 0.012"
         position="0 0 -1"></a-cursor>
     </a-camera>
+
+    <!-- VR hand controllers — laser pointers that can click portal doors with the trigger -->
+    <a-entity id="leftHand"
+      laser-controls="hand: left"
+      raycaster="objects: .clickable-door; far: 60; lineColor: #ffd080; lineOpacity: 0.55"></a-entity>
+    <a-entity id="rightHand"
+      laser-controls="hand: right"
+      raycaster="objects: .clickable-door; far: 60; lineColor: #ffd080; lineOpacity: 0.55"></a-entity>
   </a-entity>
 
 </a-scene>
@@ -2104,7 +2202,7 @@
       cam.setAttribute('look-controls', 'enabled', true);
       // Re-show HUD with updated hint
       var hud = document.getElementById('hud');
-      hud.textContent = 'WASD to walk · approach a door';
+      hud.innerHTML = '<div class="hud-row"><div class="hud-block"><div class="hud-label">Laptop</div><div class="hud-line"><b>WASD</b> walk &middot; <b>Mouse</b> look &middot; <b>Click</b> door to enter</div></div><div class="divider"></div><div class="hud-block"><div class="hud-label">VR Headset</div><div class="hud-line"><b>Left stick</b> walk &middot; <b>Right stick</b> turn &middot; <b>Trigger</b> on door to enter</div></div></div>';
       hud.classList.remove('fade');
       hud.style.opacity = '1';
     }, 12000);
