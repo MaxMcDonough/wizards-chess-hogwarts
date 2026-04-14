@@ -1,0 +1,2155 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Wizard's Chess — Hogwarts</title>
+  <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+
+  <script>
+    // ═══════════════════════════════════════════════════════════
+    //  COMPONENTS
+    // ═══════════════════════════════════════════════════════════
+
+    /* Flickering fire */
+    AFRAME.registerComponent('flicker', {
+      schema: { base:{default:1.5}, range:{default:0.5}, speed:{default:8} },
+      tick: function(t) {
+        var d=this.data, l=this.el.getObject3D('light');
+        if(!l) return;
+        l.intensity = Math.max(0.05, d.base
+          + Math.sin(t*d.speed*0.001)*d.range*0.5
+          + Math.sin(t*d.speed*0.0017+2.3)*d.range*0.3
+          + (Math.random()-0.5)*d.range*0.4);
+      }
+    });
+
+    /* Chess piece material — dark obsidian or light stone */
+    /* Unified "sculpted stone" material for every chess piece — old + new set */
+    AFRAME.registerComponent('chess-material', {
+      schema: { color:{default:'dark'} },
+      init: function(){
+        var col=this.data.color;
+        var el = this.el;
+        el.addEventListener('model-loaded', function(){
+          var isDark = col==='dark';
+          var mat = new THREE.MeshStandardMaterial({
+            color:      isDark ? new THREE.Color(0.11,0.115,0.14) : new THREE.Color(0.86,0.80,0.72),
+            emissive:   isDark ? new THREE.Color(0.02,0.03,0.05) : new THREE.Color(0.08,0.06,0.04),
+            emissiveIntensity: 0.45,
+            roughness:  isDark ? 0.55 : 0.62,
+            metalness:  isDark ? 0.22 : 0.08,
+            envMapIntensity: 1.2
+          });
+          el.getObject3D('mesh').traverse(function(n){
+            if(n.isMesh){
+              n.material = mat;
+              n.castShadow = true;
+              n.receiveShadow = true;
+              if (n.geometry) n.geometry.computeVertexNormals();
+            }
+          });
+          // Scale up board pieces for stronger presence; leave trophies + any piece that
+          // already has a non-unit scale alone
+          var s = el.object3D.scale;
+          var isTrophy = (el.id || '').indexOf('trophy-') === 0;
+          if (!isTrophy && Math.abs(s.x - 1) < 0.001 && Math.abs(s.y - 1) < 0.001){
+            el.object3D.scale.set(1.8, 1.8, 1.8);
+          }
+        });
+      }
+    });
+
+    /* Castle material — dark gloomy blue stone */
+    AFRAME.registerComponent('school-material', {
+      init: function(){
+        this.el.addEventListener('model-loaded', function(){
+          var mat = new THREE.MeshStandardMaterial({
+            color: new THREE.Color(0.14, 0.15, 0.26),
+            roughness: 0.75,
+            metalness: 0.1,
+            envMapIntensity: 1.0
+          });
+          this.getObject3D('mesh').traverse(function(n){
+            if(n.isMesh){
+              n.material = mat;
+              n.castShadow = true;
+              n.receiveShadow = true;
+              n.geometry.computeVertexNormals();
+            }
+          });
+        });
+      }
+    });
+
+    /* ════════════════════════════════════════════
+       BOUNDARY — keeps player inside play area
+       ════════════════════════════════════════════ */
+    AFRAME.registerComponent('boundary', {
+      schema: { minX:{default:-60}, maxX:{default:60}, minZ:{default:-60}, maxZ:{default:60}, minY:{default:0.5}, maxY:{default:40} },
+      tick: function(){
+        // Don't clamp while the cinematic flyover is still active — it drives the camera to places well outside player bounds
+        if (this.el.components.flyover && this.el.components.flyover.active) return;
+        var pos = this.el.object3D.position;
+        var d = this.data;
+        pos.x = Math.max(d.minX, Math.min(d.maxX, pos.x));
+        pos.y = Math.max(d.minY, Math.min(d.maxY, pos.y));
+        pos.z = Math.max(d.minZ, Math.min(d.maxZ, pos.z));
+      }
+    });
+
+    /* ════════════════════════════════════════════
+       BROOMSTICK FLYOVER — swoops over castle down to board
+       ════════════════════════════════════════════ */
+    AFRAME.registerComponent('flyover', {
+      init: function(){
+        this.startTime = 0;
+        this.active = true;
+        this.duration = 10000;
+        // Cinematic waypoints — the "Harry Potter arrival at Hogwarts" sequence
+        // Start: high over the lake, castle in the distance
+        this.p0 = new THREE.Vector3(-55, 55, -55);  this.l0 = new THREE.Vector3(5, 10, 15);
+        // Mid 1: dropping in over the towers, sweeping around
+        this.p1 = new THREE.Vector3(-40, 28, -30);  this.l1 = new THREE.Vector3(5, 6, 12);
+        // Mid 2: coming over the courtyard wall, pieces visible below
+        this.p2 = new THREE.Vector3(-24, 14, -20);  this.l2 = new THREE.Vector3(3, 1, 8);
+        // End: the hero shot — board on plaza, castle rising behind
+        this.p3 = new THREE.Vector3(-16, 6, -13);   this.l3 = new THREE.Vector3(5, 0.8, 10);
+        this.el.object3D.position.copy(this.p0);
+        this._cam = this.el.querySelector('a-camera');
+        this._cam.setAttribute('look-controls', 'enabled', false);
+        this.el.setAttribute('wasd-controls', 'enabled', false);
+        this._tmp = new THREE.Vector3();
+        // Find the actual three.js PerspectiveCamera (child of a-camera entity)
+        this._threeCam = null;
+        var self = this;
+        this._cam.object3D.traverse(function(o){ if (o.isCamera) self._threeCam = o; });
+      },
+      // Point the entity so its -Z axis points at the target
+      // (A-Frame cameras follow three.js convention: -Z is forward)
+      _lookAtEntity: function(entity, target){
+        // three.js Object3D.lookAt works correctly for cameras: -Z points at target
+        // But A-Frame wraps cameras in an entity whose forward may differ.
+        // Directly orient the rig entity so its -Z faces the target, since camera local pos is non-zero but local rot is zero in our setup.
+        var pos = new THREE.Vector3();
+        entity.object3D.getWorldPosition(pos);
+        var m = new THREE.Matrix4();
+        m.lookAt(pos, target, new THREE.Vector3(0, 1, 0));
+        entity.object3D.quaternion.setFromRotationMatrix(m);
+      },
+      _bezier3: function(t, p0, p1, p2, p3, out){
+        var u = 1 - t;
+        var tt = t * t, uu = u * u;
+        var uuu = uu * u, ttt = tt * t;
+        out.x = uuu*p0.x + 3*uu*t*p1.x + 3*u*tt*p2.x + ttt*p3.x;
+        out.y = uuu*p0.y + 3*uu*t*p1.y + 3*u*tt*p2.y + ttt*p3.y;
+        out.z = uuu*p0.z + 3*uu*t*p1.z + 3*u*tt*p2.z + ttt*p3.z;
+      },
+      tick: function(t){
+        if(!this.active) return;
+        // Hold until the Max McDonough Designs intro finishes
+        if(!window.__mmdIntroDone){ this.startTime = 0; return; }
+        if(!this.startTime){ this.startTime = t + 800; return; }
+        if(t < this.startTime) return;
+        var elapsed = t - this.startTime;
+        var progress = Math.min(1, elapsed / this.duration);
+        // Cubic ease in-out
+        var ease = progress < 0.5 ? 4*progress*progress*progress : 1-Math.pow(-2*progress+2,3)/2;
+        // Bezier curve through the 4 waypoints — smooth swoop
+        var pos = new THREE.Vector3();
+        var look = new THREE.Vector3();
+        this._bezier3(ease, this.p0, this.p1, this.p2, this.p3, pos);
+        this._bezier3(ease, this.l0, this.l1, this.l2, this.l3, look);
+        this.el.object3D.position.copy(pos);
+        // Rotate the rig itself so camera looks at target (rig contains camera)
+        this._lookAtEntity(this.el, look);
+        if(progress >= 1){
+          this.active = false;
+          document.getElementById('hud').style.opacity = '1';
+          setTimeout(function(){ document.dispatchEvent(new Event('start-chess')); }, 1800);
+          // Keep camera fixed in cinematic pose — don't re-enable look-controls (the view is locked for the show)
+        }
+      }
+    });
+
+    /* ════════════════════════════════════════════
+       FLY CONTROLS — Q up, E down
+       ════════════════════════════════════════════ */
+    AFRAME.registerComponent('fly-controls', {
+      schema: { speed:{default:8} },
+      init: function(){
+        this.keys={};
+        var self=this;
+        document.addEventListener('keydown', function(e){ self.keys[e.code]=true; });
+        document.addEventListener('keyup', function(e){ self.keys[e.code]=false; });
+      },
+      tick: function(t,dt){
+        if(!dt) return;
+        var spd = this.data.speed * dt * 0.001;
+        var pos = this.el.object3D.position;
+        if(this.keys['KeyQ']) pos.y += spd;
+        if(this.keys['KeyE']) pos.y -= spd;
+      }
+    });
+
+    /* ════════════════════════════════════════════
+       WIZARD CHESSBOARD
+       ════════════════════════════════════════════ */
+    AFRAME.registerComponent('wizard-chessboard', {
+      schema: { size:{default:8}, squareSize:{default:2.5} },
+      init: function(){
+        var d=this.data, group=new THREE.Group();
+        var darkMat = new THREE.MeshStandardMaterial({ color:new THREE.Color(0.05,0.08,0.22), roughness:0.25, metalness:0.15 });
+        var lightMat = new THREE.MeshStandardMaterial({ color:new THREE.Color(0.65,0.62,0.58), roughness:0.30, metalness:0.08 });
+        var geo = new THREE.BoxGeometry(d.squareSize, 0.2, d.squareSize);
+        var half = d.size/2;
+        for(var r=0;r<d.size;r++){
+          for(var c=0;c<d.size;c++){
+            var isDark = (r+c)%2===0;
+            var tile = new THREE.Mesh(geo, isDark?darkMat:lightMat);
+            tile.position.set((c-half+0.5)*d.squareSize, 0, (r-half+0.5)*d.squareSize);
+            tile.receiveShadow=true;
+            group.add(tile);
+          }
+        }
+        // Stone platform beneath the board
+        var platMat = new THREE.MeshStandardMaterial({color:new THREE.Color(0.08,0.08,0.10), roughness:0.7, metalness:0.05});
+        var platGeo = new THREE.BoxGeometry(d.size*d.squareSize+2, 0.5, d.size*d.squareSize+2);
+        var plat = new THREE.Mesh(platGeo, platMat);
+        plat.position.y = -0.35;
+        plat.receiveShadow = true;
+        group.add(plat);
+        this.el.setObject3D('mesh',group);
+      }
+    });
+
+    /* ════════════════════════════════════════════
+       FIRE BRAZIER
+       ════════════════════════════════════════════ */
+    AFRAME.registerComponent('brazier', {
+      init: function(){
+        var group=new THREE.Group();
+        var mat=new THREE.MeshStandardMaterial({color:new THREE.Color(0.08,0.07,0.06),roughness:0.75,metalness:0.1});
+        var base=new THREE.Mesh(new THREE.CylinderGeometry(0.3,0.4,1.0,8),mat);
+        base.position.set(0,0.5,0); group.add(base);
+        var bowl=new THREE.Mesh(new THREE.CylinderGeometry(0.6,0.35,0.5,8,1,true),mat);
+        bowl.position.set(0,1.05,0); group.add(bowl);
+        var fm=new THREE.MeshBasicMaterial({color:new THREE.Color(1,0.6,0.15),transparent:true,opacity:0.7});
+        this.fire=new THREE.Mesh(new THREE.SphereGeometry(0.3,6,6),fm);
+        this.fire.position.y=1.2;this.fire.scale.y=1.4;group.add(this.fire);
+        var tm=new THREE.MeshBasicMaterial({color:new THREE.Color(1,0.3,0.05),transparent:true,opacity:0.5});
+        this.tip=new THREE.Mesh(new THREE.ConeGeometry(0.18,0.5,6),tm);
+        this.tip.position.y=1.55;group.add(this.tip);
+        this.fm=fm;
+        this.el.setObject3D('mesh',group);
+      },
+      tick:function(t){
+        if(!this.fire)return;
+        var s=0.9+Math.sin(t*0.008)*0.15+Math.sin(t*0.013)*0.1;
+        this.fire.scale.set(s,1.2+Math.sin(t*0.01)*0.2,s);
+        this.tip.scale.set(s*0.8,1+Math.sin(t*0.015)*0.3,s*0.8);
+        this.tip.position.y=1.55+Math.sin(t*0.009)*0.08;
+        this.fm.opacity=0.5+Math.sin(t*0.012)*0.2;
+      }
+    });
+
+    /* Procedural Pawn */
+    AFRAME.registerComponent('pawn', {
+      schema:{color:{default:'dark'}},
+      init:function(){
+        var isDark=this.data.color==='dark';
+        var mat=new THREE.MeshStandardMaterial({
+          color:isDark?new THREE.Color(0.06,0.065,0.09):new THREE.Color(0.72,0.68,0.62),
+          roughness:isDark?0.35:0.42,metalness:isDark?0.25:0.12
+        });
+        var g=new THREE.Group();
+        var p1=new THREE.Mesh(new THREE.CylinderGeometry(0.35,0.45,0.3,10),mat); p1.position.set(0,0.15,0); g.add(p1);
+        var p2=new THREE.Mesh(new THREE.CylinderGeometry(0.22,0.32,1.0,10),mat); p2.position.set(0,0.8,0); g.add(p2);
+        var p3=new THREE.Mesh(new THREE.SphereGeometry(0.22,10,10),mat); p3.position.set(0,1.5,0); g.add(p3);
+        var p4=new THREE.Mesh(new THREE.BoxGeometry(0.35,0.5,0.06),mat); p4.position.set(-0.3,0.9,0); g.add(p4);
+        this.el.setObject3D('mesh',g);
+      }
+    });
+
+    /* Procedural Rook */
+    AFRAME.registerComponent('rook', {
+      schema:{color:{default:'dark'}},
+      init:function(){
+        var isDark=this.data.color==='dark';
+        var mat=new THREE.MeshStandardMaterial({
+          color:isDark?new THREE.Color(0.06,0.065,0.09):new THREE.Color(0.72,0.68,0.62),
+          roughness:isDark?0.35:0.42,metalness:isDark?0.25:0.12
+        });
+        var g=new THREE.Group();
+        var r1=new THREE.Mesh(new THREE.CylinderGeometry(0.45,0.55,0.35,10),mat); r1.position.set(0,0.175,0); g.add(r1);
+        var r2=new THREE.Mesh(new THREE.CylinderGeometry(0.35,0.4,1.6,10),mat); r2.position.set(0,1.15,0); g.add(r2);
+        var r3=new THREE.Mesh(new THREE.CylinderGeometry(0.45,0.38,0.2,10),mat); r3.position.set(0,2.0,0); g.add(r3);
+        for(var i=0;i<5;i++){
+          var a=i/5*Math.PI*2;
+          var m=new THREE.Mesh(new THREE.BoxGeometry(0.14,0.25,0.14),mat);
+          m.position.set(Math.cos(a)*0.38,2.25,Math.sin(a)*0.38);g.add(m);
+        }
+        this.el.setObject3D('mesh',g);
+      }
+    });
+
+    /* ════════════════════════════════════════════
+       CHESS GAME — pieces move like in the movie
+       ════════════════════════════════════════════ */
+    AFRAME.registerComponent('chess-game', {
+      init: function(){
+        this.moves = [
+          // [pieceId, toX, toZ, duration, captureId]
+          // Opening: white pawn advances
+          {piece:'wp-e', tx:1.25, tz:1.25, dur:1800, delay:0},
+          // Black pawn responds
+          {piece:'bp-d', tx:-1.25, tz:-1.25, dur:1800, delay:2200},
+          // White pawn attacks
+          {piece:'wp-d', tx:-1.25, tz:1.25, dur:2000, delay:4500},
+          // Black knight jumps
+          {piece:'dk-b', tx:-3.75, tz:-3.75, dur:2200, delay:7000},
+          // White bishop slides
+          {piece:'lb-c', tx:1.25, tz:3.75, dur:2000, delay:9500},
+          // Black rook charges across — CAPTURES white pawn (dramatic smash!)
+          {piece:'dr-a', tx:-8.75, tz:1.25, dur:2500, delay:12000, capture:'wp-d', smash:true},
+          // White knight repositions
+          {piece:'lk-b', tx:-3.75, tz:3.75, dur:2000, delay:15000},
+          // Ron's sacrifice — white knight moves into danger
+          {piece:'lk-g', tx:3.75, tz:-1.25, dur:2500, delay:17500, heroic:true},
+          // Black queen captures Ron's knight (the sacrifice!)
+          {piece:'dq', tx:3.75, tz:-1.25, dur:3000, delay:20500, capture:'lk-g', smash:true},
+          // Harry (white bishop) makes the winning move
+          {piece:'lb-f', tx:-1.25, tz:-6.25, dur:2000, delay:24000, heroic:true},
+        ];
+        this.started = false;
+        this.moveIndex = 0;
+        this.currentMove = null;
+        this.moveStartTime = 0;
+        this.gameStartTime = 0;
+        var self = this;
+        document.addEventListener('start-chess', function(){
+          self.started = true;
+          self.gameStartTime = performance.now();
+        });
+      },
+      tick: function(t){
+        if(!this.started) return;
+        var elapsed = t - this.gameStartTime;
+
+        // Process moves based on timing
+        for(var i = 0; i < this.moves.length; i++){
+          var move = this.moves[i];
+          if(move.done) continue;
+          if(elapsed < move.delay) continue;
+
+          var moveElapsed = elapsed - move.delay;
+          var progress = Math.min(1, moveElapsed / move.dur);
+          // Smooth ease
+          var ease = progress < 0.5 ? 2*progress*progress : 1-Math.pow(-2*progress+2,2)/2;
+
+          var el = document.getElementById(move.piece);
+          if(!el) { move.done = true; continue; }
+
+          if(!move.startPos){
+            move.startPos = {x: el.object3D.position.x, z: el.object3D.position.z};
+          }
+
+          // Slide piece
+          var nx = move.startPos.x + (move.tx - move.startPos.x) * ease;
+          var nz = move.startPos.z + (move.tz - move.startPos.z) * ease;
+
+          // Add a slight hop for knights, dramatic slide for others
+          var hop = 0;
+          if(move.piece.indexOf('k-') > -1){
+            hop = Math.sin(progress * Math.PI) * 1.5; // knights jump
+          }
+
+          el.object3D.position.x = nx;
+          el.object3D.position.z = nz;
+          el.object3D.position.y = 0.1 + hop;
+
+          // Capture: smash the target piece
+          if(move.capture && progress > 0.85 && !move.captured){
+            move.captured = true;
+            var target = document.getElementById(move.capture);
+            if(target){
+              // Dramatic destruction — piece falls over and fades
+              target.setAttribute('animation__fall', 'property:rotation; to:90 0 0; dur:600; easing:easeInQuad');
+              target.setAttribute('animation__sink', 'property:position; to:'+target.object3D.position.x+' -2 '+target.object3D.position.z+'; dur:1200; delay:400; easing:easeInQuad');
+              target.setAttribute('animation__fade', 'property:scale; to:0.01 0.01 0.01; dur:800; delay:1000');
+              // Dispatch a semantic event for characters listening for their piece's destruction
+              if (move.capture === 'lk-g') {
+                document.dispatchEvent(new CustomEvent('ron-falls'));
+              }
+            }
+          }
+
+          // Final checkmate move — fire event so king's sword falls
+          if(move.piece === 'lb-f' && progress > 0.85 && !move.kingBroken){
+            move.kingBroken = true;
+            document.dispatchEvent(new CustomEvent('king-defeated'));
+          }
+
+          // Heroic glow for key pieces
+          if(move.heroic && !move.glowed && progress > 0.1){
+            move.glowed = true;
+            // brief flash on heroic moves would go here
+          }
+
+          if(progress >= 1){
+            move.done = true;
+          }
+        }
+      }
+    });
+
+    /* ════════════════════════════════════════════
+       STUDENT SILHOUETTE — Harry / Ron / Hermione on their chess squares
+       Low-poly cloaked figures, visible as silhouettes against torchlight
+       ════════════════════════════════════════════ */
+    AFRAME.registerComponent('student', {
+      schema: { who: {default:'ron'} },
+      init: function(){
+        // House accent color hints at which character is which
+        var accents = {
+          harry:    new THREE.Color(0.22, 0.22, 0.30),   // dark, understated
+          ron:      new THREE.Color(0.85, 0.28, 0.20),   // red — Gryffindor / Weasley
+          hermione: new THREE.Color(0.55, 0.38, 0.22)    // brown hair tone
+        };
+        var accent = accents[this.data.who] || accents.ron;
+
+        var robeMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(0.10, 0.10, 0.13),
+          roughness: 0.92, metalness: 0.03,
+          emissive: new THREE.Color(0.04, 0.04, 0.06), emissiveIntensity: 0.6
+        });
+        var scarfMat = new THREE.MeshStandardMaterial({
+          color: accent, roughness: 0.85, metalness: 0.04,
+          emissive: accent.clone().multiplyScalar(0.15), emissiveIntensity: 0.8
+        });
+        var skinMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(0.78, 0.66, 0.54),
+          roughness: 0.75, metalness: 0.02
+        });
+        var hairMat = new THREE.MeshStandardMaterial({
+          color: accent.clone().multiplyScalar(0.65),
+          roughness: 0.8, metalness: 0.02
+        });
+
+        var g = new THREE.Group();
+        // Cloak body — tapered
+        var body = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.22, 0.45, 1.3, 10),
+          robeMat
+        );
+        body.position.y = 0.65; body.castShadow = true; g.add(body);
+        // Shoulder cap
+        var shld = new THREE.Mesh(
+          new THREE.SphereGeometry(0.35, 10, 6),
+          robeMat
+        );
+        shld.position.y = 1.20; shld.scale.y = 0.5; g.add(shld);
+        // Neck / scarf accent
+        var scarf = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.16, 0.19, 0.12, 10),
+          scarfMat
+        );
+        scarf.position.y = 1.32; g.add(scarf);
+        // Head
+        var head = new THREE.Mesh(
+          new THREE.SphereGeometry(0.24, 12, 10),
+          skinMat
+        );
+        head.position.y = 1.52; head.castShadow = true; g.add(head);
+        // Hair cap — top-of-head dome
+        var hair = new THREE.Mesh(
+          new THREE.SphereGeometry(0.245, 12, 10, 0, Math.PI*2, 0, Math.PI * 0.55),
+          hairMat
+        );
+        hair.position.y = 1.55; g.add(hair);
+
+        this.el.setObject3D('student', g);
+        this._group = g;
+      }
+    });
+
+    /* Follow a target entity's world position with an offset — decouples silhouette from piece scale */
+    AFRAME.registerComponent('follow-piece', {
+      schema: {
+        target: {type:'selector'},
+        offset: {type:'vec3', default:{x:0, y:0, z:0}}
+      },
+      init: function(){
+        this._detached = false;
+        this._worldPos = new THREE.Vector3();
+      },
+      detach: function(){ this._detached = true; },
+      tick: function(){
+        if (this._detached) return;
+        var t = this.data.target;
+        if (!t || !t.object3D) return;
+        t.object3D.getWorldPosition(this._worldPos);
+        this.el.object3D.position.set(
+          this._worldPos.x + this.data.offset.x,
+          this._worldPos.y + this.data.offset.y,
+          this._worldPos.z + this.data.offset.z
+        );
+      }
+    });
+
+    /* King's sword — decorative sword that falls on checkmate */
+    AFRAME.registerComponent('kings-sword', {
+      init: function(){
+        var goldMat = new THREE.MeshStandardMaterial({
+          color:new THREE.Color(0.78,0.62,0.26), roughness:0.2, metalness:0.9,
+          emissive:new THREE.Color(0.18,0.10,0.02), emissiveIntensity:0.4
+        });
+        var steelMat = new THREE.MeshStandardMaterial({
+          color:new THREE.Color(0.82,0.85,0.90), roughness:0.18, metalness:0.9
+        });
+        var g = new THREE.Group();
+        var blade = new THREE.Mesh(new THREE.BoxGeometry(0.10, 1.6, 0.04), steelMat);
+        blade.position.y = 0.8; g.add(blade);
+        var guard = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.08, 0.08), goldMat);
+        guard.position.y = 0.0; g.add(guard);
+        var grip = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.25, 8), steelMat);
+        grip.position.y = -0.14; g.add(grip);
+        var pommel = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 6), goldMat);
+        pommel.position.y = -0.3; g.add(pommel);
+        this.el.setObject3D('sword', g);
+      }
+    });
+
+    /* ════════════════════════════════════════════
+       STONE CHAMBER — tall walls, columns, arches like the movie
+       ════════════════════════════════════════════ */
+    AFRAME.registerComponent('stone-chamber', {
+      init: function(){
+        var group = new THREE.Group();
+        var wallMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(0.08, 0.08, 0.14),
+          roughness: 0.85, metalness: 0.05
+        });
+        var pillarMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(0.10, 0.10, 0.16),
+          roughness: 0.7, metalness: 0.08
+        });
+        var floorMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(0.05, 0.05, 0.08),
+          roughness: 0.9, metalness: 0.02
+        });
+
+        var W = 32;   // chamber half-width
+        var H = 22;   // wall height
+        var T = 1.5;  // wall thickness
+
+        // FOUR WALLS
+        // North wall (behind dark pieces)
+        var nWall = new THREE.Mesh(new THREE.BoxGeometry(W*2, H, T), wallMat);
+        nWall.position.set(0, H/2 - 0.5, -W); nWall.receiveShadow = true; group.add(nWall);
+        // South wall (behind light pieces)
+        var sWall = new THREE.Mesh(new THREE.BoxGeometry(W*2, H, T), wallMat);
+        sWall.position.set(0, H/2 - 0.5, W); sWall.receiveShadow = true; group.add(sWall);
+        // West wall
+        var wWall = new THREE.Mesh(new THREE.BoxGeometry(T, H, W*2), wallMat);
+        wWall.position.set(-W, H/2 - 0.5, 0); wWall.receiveShadow = true; group.add(wWall);
+        // East wall
+        var eWall = new THREE.Mesh(new THREE.BoxGeometry(T, H, W*2), wallMat);
+        eWall.position.set(W, H/2 - 0.5, 0); eWall.receiveShadow = true; group.add(eWall);
+
+        // STONE PILLARS — 3 per side, like the movie chamber
+        var pillarGeo = new THREE.CylinderGeometry(0.8, 1.0, H, 12);
+        var capGeo = new THREE.CylinderGeometry(1.3, 0.85, 1.2, 12);
+        var baseGeo = new THREE.CylinderGeometry(0.9, 1.3, 1.0, 12);
+
+        var pillarPositions = [
+          // Along north wall
+          [-16, -W+0.5], [0, -W+0.5], [16, -W+0.5],
+          // Along south wall
+          [-16, W-0.5], [0, W-0.5], [16, W-0.5],
+          // Along west wall
+          [-W+0.5, -16], [-W+0.5, 0], [-W+0.5, 16],
+          // Along east wall
+          [W-0.5, -16], [W-0.5, 0], [W-0.5, 16],
+          // Corner pillars (larger feel)
+          [-W+0.5, -W+0.5], [W-0.5, -W+0.5],
+          [-W+0.5, W-0.5], [W-0.5, W-0.5],
+        ];
+
+        for(var i = 0; i < pillarPositions.length; i++){
+          var px = pillarPositions[i][0], pz = pillarPositions[i][1];
+          var pillar = new THREE.Mesh(pillarGeo, pillarMat);
+          pillar.position.set(px, H/2 - 0.5, pz);
+          pillar.castShadow = true; pillar.receiveShadow = true;
+          group.add(pillar);
+          // Capital on top
+          var cap = new THREE.Mesh(capGeo, pillarMat);
+          cap.position.set(px, H - 0.5, pz);
+          group.add(cap);
+          // Base
+          var base = new THREE.Mesh(baseGeo, pillarMat);
+          base.position.set(px, 0, pz);
+          group.add(base);
+        }
+
+        // ARCHED OPENINGS hint — decorative horizontal beams between pillars at top
+        var beamGeo = new THREE.BoxGeometry(1, 1.5, 1);
+        // Crossbeams along top of walls
+        var crossGeo = new THREE.BoxGeometry(W*2 + 2, 1.5, T + 1);
+        var nBeam = new THREE.Mesh(crossGeo, pillarMat);
+        nBeam.position.set(0, H - 0.2, -W); group.add(nBeam);
+        var sBeam = new THREE.Mesh(crossGeo, pillarMat);
+        sBeam.position.set(0, H - 0.2, W); group.add(sBeam);
+        var crossGeoZ = new THREE.BoxGeometry(T + 1, 1.5, W*2 + 2);
+        var wBeam = new THREE.Mesh(crossGeoZ, pillarMat);
+        wBeam.position.set(-W, H - 0.2, 0); group.add(wBeam);
+        var eBeam = new THREE.Mesh(crossGeoZ, pillarMat);
+        eBeam.position.set(W, H - 0.2, 0); group.add(eBeam);
+
+        // Extended stone floor
+        var floor = new THREE.Mesh(new THREE.BoxGeometry(W*2+4, 0.3, W*2+4), floorMat);
+        floor.position.set(0, -0.7, 0); floor.receiveShadow = true;
+        group.add(floor);
+
+        this.el.setObject3D('mesh', group);
+      }
+    });
+
+    /* ════════════════════════════════════════════
+       STONE CHAMBER — the Mirror of Erised room
+       Dark stone walls, braziers, an ornate gold mirror,
+       and the Philosopher's Stone floating in front of it
+       ════════════════════════════════════════════ */
+    AFRAME.registerComponent('stone-chamber-inner', {
+      init: function(){
+        var group = new THREE.Group();
+
+        var floorMat = new THREE.MeshStandardMaterial({
+          color:new THREE.Color(0.30,0.24,0.20), roughness:0.9, metalness:0.05,
+          emissive:new THREE.Color(0.08,0.06,0.04), emissiveIntensity:1.0,
+          side: THREE.DoubleSide
+        });
+        var wallMat = new THREE.MeshStandardMaterial({
+          color:new THREE.Color(0.38,0.31,0.26), roughness:0.85, metalness:0.04,
+          emissive:new THREE.Color(0.10,0.08,0.06), emissiveIntensity:1.0,
+          side: THREE.DoubleSide
+        });
+        var pillarMat = new THREE.MeshStandardMaterial({
+          color:new THREE.Color(0.42,0.35,0.30), roughness:0.7, metalness:0.08,
+          emissive:new THREE.Color(0.10,0.08,0.06), emissiveIntensity:1.0
+        });
+        var goldMat = new THREE.MeshStandardMaterial({
+          color:new THREE.Color(0.75,0.56,0.22), roughness:0.25, metalness:0.85,
+          emissive:new THREE.Color(0.28,0.18,0.05), emissiveIntensity:0.6
+        });
+        var mirrorMat = new THREE.MeshStandardMaterial({
+          color:new THREE.Color(0.02,0.03,0.06), roughness:0.12, metalness:0.85,
+          emissive:new THREE.Color(0.03,0.04,0.08), emissiveIntensity:0.4
+        });
+
+        var CW = 22, CH = 16, CT = 0.6; // chamber half-width, height, wall thickness
+
+        // Floor — large hexagonal feeling done as a square with warm accent
+        var floor = new THREE.Mesh(new THREE.BoxGeometry(CW*2, 0.4, CW*2), floorMat);
+        floor.position.y = -0.2; floor.receiveShadow = true; group.add(floor);
+
+        // Four walls
+        var mkWall = function(w,h,d,x,y,z){
+          var m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), wallMat);
+          m.position.set(x,y,z); m.receiveShadow = true; return m;
+        };
+        group.add(mkWall(CW*2, CH, CT, 0, CH/2-0.2,  CW));   // back (+Z)
+        group.add(mkWall(CW*2, CH, CT, 0, CH/2-0.2, -CW));   // front (-Z) — we face this way usually
+        group.add(mkWall(CT, CH, CW*2, -CW, CH/2-0.2, 0));
+        group.add(mkWall(CT, CH, CW*2,  CW, CH/2-0.2, 0));
+
+        // Pillars lining the walls
+        var pillarGeo = new THREE.CylinderGeometry(0.6, 0.75, CH-1, 10);
+        var capGeo    = new THREE.CylinderGeometry(1.0, 0.65, 0.9, 10);
+        var baseGeo   = new THREE.CylinderGeometry(0.7, 1.0, 0.8, 10);
+        var positions = [
+          [-CW+1, -10], [-CW+1, 0], [-CW+1, 10],
+          [ CW-1, -10], [ CW-1, 0], [ CW-1, 10],
+          [-10, -CW+1], [0, -CW+1], [10, -CW+1],
+          [-10,  CW-1], [0,  CW-1], [10,  CW-1],
+        ];
+        for (var i = 0; i < positions.length; i++){
+          var px = positions[i][0], pz = positions[i][1];
+          var p = new THREE.Mesh(pillarGeo, pillarMat); p.position.set(px, CH/2-0.2, pz); p.castShadow=true; group.add(p);
+          var c = new THREE.Mesh(capGeo, pillarMat);    c.position.set(px, CH-0.6, pz); group.add(c);
+          var b = new THREE.Mesh(baseGeo, pillarMat);   b.position.set(px, 0.2, pz); group.add(b);
+        }
+
+        // Ceiling crossbeams for scale
+        var beam = new THREE.BoxGeometry(CW*2+2, 0.8, 0.8);
+        for (var z = -CW+2; z <= CW-2; z += 6){
+          var bm = new THREE.Mesh(beam, pillarMat); bm.position.set(0, CH-0.6, z); group.add(bm);
+        }
+
+        // ─── Mirror of Erised at center-back ───
+        var mirrorGroup = new THREE.Group();
+        // tall arched frame
+        var frameW = 4.8, frameH = 8.4, frameT = 0.45;
+        // sides
+        var sideGeo = new THREE.BoxGeometry(frameT, frameH, frameT);
+        var lSide = new THREE.Mesh(sideGeo, goldMat); lSide.position.set(-frameW/2, frameH/2, 0); mirrorGroup.add(lSide);
+        var rSide = new THREE.Mesh(sideGeo, goldMat); rSide.position.set( frameW/2, frameH/2, 0); mirrorGroup.add(rSide);
+        // crown beam
+        var topGeo = new THREE.BoxGeometry(frameW+frameT*2, frameT*1.5, frameT*1.5);
+        var top = new THREE.Mesh(topGeo, goldMat); top.position.set(0, frameH+frameT*0.6, 0); mirrorGroup.add(top);
+        // base pedestal
+        var basePedGeo = new THREE.BoxGeometry(frameW+1, 0.5, 0.9);
+        var basePed = new THREE.Mesh(basePedGeo, goldMat); basePed.position.set(0, 0.25, 0); mirrorGroup.add(basePed);
+        // decorative finials
+        var finGeo = new THREE.ConeGeometry(0.35, 0.8, 10);
+        var finL = new THREE.Mesh(finGeo, goldMat); finL.position.set(-frameW/2-frameT, frameH+frameT*1.8, 0); mirrorGroup.add(finL);
+        var finR = new THREE.Mesh(finGeo, goldMat); finR.position.set( frameW/2+frameT, frameH+frameT*1.8, 0); mirrorGroup.add(finR);
+        var finC = new THREE.Mesh(new THREE.ConeGeometry(0.5, 1.2, 12), goldMat);
+        finC.position.set(0, frameH+frameT*2.5, 0); mirrorGroup.add(finC);
+        // mirror surface — tall rounded rectangle (approx)
+        var mirrorGeo = new THREE.PlaneGeometry(frameW - frameT*2, frameH - frameT*2);
+        var mirror = new THREE.Mesh(mirrorGeo, mirrorMat);
+        mirror.position.set(0, frameH/2, frameT*0.51);
+        mirrorGroup.add(mirror);
+
+        mirrorGroup.position.set(0, 0.5, CW-1.5);
+        group.add(mirrorGroup);
+
+        // ─── The Philosopher's Stone — small red gem on pedestal in front of mirror ───
+        var stoneGroup = new THREE.Group();
+        // ornate small pedestal
+        var psBaseMat = new THREE.MeshStandardMaterial({
+          color:new THREE.Color(0.15,0.13,0.10), roughness:0.65, metalness:0.5
+        });
+        var psBase = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.75, 0.4, 12), psBaseMat);
+        psBase.position.y = 0.2; stoneGroup.add(psBase);
+        var psCol = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.3, 1.2, 12), psBaseMat);
+        psCol.position.y = 1.0; stoneGroup.add(psCol);
+        var psDish = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.32, 0.22, 12), psBaseMat);
+        psDish.position.y = 1.7; stoneGroup.add(psDish);
+
+        // The stone itself — brilliant RUBY-RED crystal (octahedron shape)
+        var stoneMat = new THREE.MeshStandardMaterial({
+          color:new THREE.Color(0.92,0.12,0.14), roughness:0.22, metalness:0.55,
+          emissive:new THREE.Color(0.78,0.08,0.10), emissiveIntensity:1.0
+        });
+        var stone = new THREE.Mesh(new THREE.OctahedronGeometry(0.42, 0), stoneMat);
+        stone.position.y = 2.05;
+        stone.castShadow = true;
+        stoneGroup.add(stone);
+
+        // glowing aura spheres — red
+        var auraMat = new THREE.MeshBasicMaterial({
+          color:new THREE.Color(1.0,0.30,0.32), transparent:true, opacity:0.30
+        });
+        var aura = new THREE.Mesh(new THREE.SphereGeometry(0.8, 14, 14), auraMat);
+        aura.position.y = 2.05; stoneGroup.add(aura);
+        var aura2Mat = new THREE.MeshBasicMaterial({
+          color:new THREE.Color(1.0,0.45,0.42), transparent:true, opacity:0.13
+        });
+        var aura2 = new THREE.Mesh(new THREE.SphereGeometry(1.6, 14, 14), aura2Mat);
+        aura2.position.y = 2.05; stoneGroup.add(aura2);
+
+        stoneGroup.position.set(0, 0, CW-4.2);
+        group.add(stoneGroup);
+
+        this._stone = stone;
+        this._aura = aura;
+        this._auraMat = auraMat;
+        this._aura2Mat = aura2Mat;
+
+        // Point light emanating from the stone — warm ruby red
+        var stoneLight = new THREE.PointLight(0xff3a36, 4.0, 28, 1.4);
+        stoneLight.position.set(0, 2.3, CW-4.2);
+        group.add(stoneLight);
+        this._stoneLight = stoneLight;
+
+        // ─── FLOATING CANDLES (Great Hall style) ───
+        this._candles = [];
+        for (var i = 0; i < 14; i++){
+          var cg = new THREE.Group();
+          var candleMat = new THREE.MeshStandardMaterial({
+            color:new THREE.Color(0.92,0.88,0.78), roughness:0.6, metalness:0.05
+          });
+          var candle = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 0.5, 8), candleMat);
+          cg.add(candle);
+          var flameMat = new THREE.MeshBasicMaterial({
+            color:new THREE.Color(1.0,0.75,0.35), transparent:true, opacity:0.9
+          });
+          var flame = new THREE.Mesh(new THREE.SphereGeometry(0.055, 6, 6), flameMat);
+          flame.position.y = 0.32; cg.add(flame);
+          var pl = new THREE.PointLight(0xffbf70, 0.5, 6, 1.5);
+          pl.position.y = 0.32; cg.add(pl);
+          // scatter at random positions around the chamber at different heights
+          var ang = (i / 14) * Math.PI * 2 + Math.random() * 0.3;
+          var rad = 6 + Math.random() * 10;
+          cg.position.set(Math.cos(ang) * rad, 5 + Math.random() * 6, Math.sin(ang) * rad);
+          group.add(cg);
+          this._candles.push({group: cg, flame: flame, flameMat: flameMat, light: pl,
+            baseY: cg.position.y, phase: Math.random() * Math.PI * 2, speed: 0.4 + Math.random() * 0.5});
+        }
+
+        // ─── DUST MOTES drifting in the air ───
+        var dustGeo = new THREE.BufferGeometry();
+        var dustCount = 500;
+        var dustPos = new Float32Array(dustCount * 3);
+        for (var d = 0; d < dustCount; d++){
+          dustPos[d*3+0] = (Math.random() - 0.5) * CW * 1.8;
+          dustPos[d*3+1] = Math.random() * CH * 0.9 + 0.5;
+          dustPos[d*3+2] = (Math.random() - 0.5) * CW * 1.8;
+        }
+        dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+        var dustMat = new THREE.PointsMaterial({
+          size:0.06, color:0xffd880, transparent:true, opacity:0.45,
+          sizeAttenuation:true, depthWrite:false
+        });
+        var dust = new THREE.Points(dustGeo, dustMat);
+        group.add(dust);
+        this._dust = dust;
+
+        // ─── GOLDEN ARCHWAY at the back wall (portal feel) ───
+        var archGroup = new THREE.Group();
+        var archGold = new THREE.MeshStandardMaterial({
+          color:new THREE.Color(0.82,0.62,0.24), roughness:0.2, metalness:0.9,
+          emissive:new THREE.Color(0.35,0.22,0.05), emissiveIntensity:0.7
+        });
+        var archPost = new THREE.BoxGeometry(0.35, 6, 0.35);
+        var apL = new THREE.Mesh(archPost, archGold); apL.position.set(-2, 3, 0); archGroup.add(apL);
+        var apR = new THREE.Mesh(archPost, archGold); apR.position.set(2, 3, 0); archGroup.add(apR);
+        var apT = new THREE.Mesh(new THREE.BoxGeometry(4.35, 0.35, 0.35), archGold);
+        apT.position.set(0, 6.15, 0); archGroup.add(apT);
+        // inner glow pane (backlit)
+        var archGlow = new THREE.MeshBasicMaterial({
+          color:new THREE.Color(1.0,0.85,0.45), transparent:true, opacity:0.45
+        });
+        var archPane = new THREE.Mesh(new THREE.PlaneGeometry(3.8, 5.8), archGlow);
+        archPane.position.set(0, 3.05, 0.02); archGroup.add(archPane);
+        archGroup.position.set(0, 0, -CW + 0.5);
+        group.add(archGroup);
+
+        // warm backlight behind the arch
+        var archLight = new THREE.PointLight(0xffc070, 3.0, 22, 1.4);
+        archLight.position.set(0, 3.5, -CW + 1.2);
+        group.add(archLight);
+
+        // ─── CHESS PIECE TROPHIES — four pedestals flanking the stone ───
+        // We'll create empty pedestals here and attach chess piece entities from the scene graph
+        var pedMat = new THREE.MeshStandardMaterial({
+          color:new THREE.Color(0.11,0.10,0.08), roughness:0.55, metalness:0.35
+        });
+        var pedPositions = [
+          [-8, 0, CW-5.5],
+          [ 8, 0, CW-5.5],
+          [-5, 0, CW-9.5],
+          [ 5, 0, CW-9.5],
+        ];
+        this._pedPositions = pedPositions;
+        for (var pi = 0; pi < pedPositions.length; pi++){
+          var pp = pedPositions[pi];
+          var col = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.65, 2.4, 12), pedMat);
+          col.position.set(pp[0], 1.2, pp[2]); group.add(col);
+          var top = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.55, 0.25, 12), pedMat);
+          top.position.set(pp[0], 2.45, pp[2]); group.add(top);
+          var base = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.9, 0.35, 12), pedMat);
+          base.position.set(pp[0], 0.17, pp[2]); group.add(base);
+        }
+
+        this.el.setObject3D('chamber', group);
+      },
+      tick: function(t){
+        if (this._stone){
+          this._stone.rotation.y = t * 0.0006;
+          this._stone.rotation.x = Math.sin(t * 0.0008) * 0.2;
+          var pulse = 0.85 + Math.sin(t * 0.003) * 0.15;
+          if (this._auraMat)  this._auraMat.opacity  = 0.22 * pulse + 0.10;
+          if (this._aura2Mat) this._aura2Mat.opacity = 0.10 * pulse + 0.06;
+          if (this._stoneLight) this._stoneLight.intensity = 3.2 + Math.sin(t * 0.003) * 1.2;
+        }
+        // Candles: subtle bob + flame flicker
+        if (this._candles){
+          for (var i = 0; i < this._candles.length; i++){
+            var c = this._candles[i];
+            c.group.position.y = c.baseY + Math.sin(t * 0.0008 * c.speed + c.phase) * 0.15;
+            var f = 0.85 + Math.sin(t * 0.01 + c.phase) * 0.15;
+            c.flame.scale.set(f, 1 + f * 0.3, f);
+            c.flameMat.opacity = 0.75 + Math.sin(t * 0.012 + c.phase) * 0.18;
+            c.light.intensity = 0.4 + Math.sin(t * 0.011 + c.phase) * 0.2;
+          }
+        }
+        // Dust drift
+        if (this._dust){
+          this._dust.rotation.y = t * 0.00005;
+        }
+      }
+    });
+
+    /* Portal door — a stone archway with two oak leaves that swing open
+       when the rig approaches. Door auto-fires the 'open-portal' event when fully open. */
+    AFRAME.registerComponent('portal-door', {
+      schema: {
+        label: {default: 'DOOR'},
+        destination: {default: ''},
+        accent: {type:'color', default:'#ffcf70'},
+        triggerDistance: {default: 7.0}
+      },
+      init: function(){
+        var label = this.data.label;
+        var dest = this.data.destination;
+        var accentCol = new THREE.Color(this.data.accent);
+
+        var goldMat = new THREE.MeshStandardMaterial({
+          color: accentCol.clone().multiplyScalar(0.95),
+          emissive: accentCol.clone().multiplyScalar(0.35),
+          emissiveIntensity: 0.9,
+          roughness: 0.28, metalness: 0.85
+        });
+        var stoneMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(0.22, 0.19, 0.17),
+          roughness: 0.9, metalness: 0.06
+        });
+        var oakMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(0.28, 0.18, 0.10),
+          roughness: 0.75, metalness: 0.08,
+          emissive: new THREE.Color(0.04, 0.02, 0.01), emissiveIntensity: 0.5
+        });
+        var glowMat = new THREE.MeshBasicMaterial({
+          color: accentCol.clone().lerp(new THREE.Color(1,1,1), 0.35),
+          transparent: true, opacity: 0.0
+        });
+
+        var g = new THREE.Group();
+
+        // ─── Stone frame ───
+        var postGeo = new THREE.BoxGeometry(0.35, 5.0, 0.35);
+        var pL = new THREE.Mesh(postGeo, stoneMat); pL.position.set(-1.6, 2.5, 0); g.add(pL);
+        var pR = new THREE.Mesh(postGeo, stoneMat); pR.position.set( 1.6, 2.5, 0); g.add(pR);
+        var topBeam = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.35, 0.5), stoneMat);
+        topBeam.position.set(0, 5.0, 0); g.add(topBeam);
+        // Gilded trim
+        var trimTop = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.10, 0.6), goldMat);
+        trimTop.position.set(0, 4.78, 0); g.add(trimTop);
+
+        // ─── Glow pane — hidden behind the doors, revealed when they swing open ───
+        var pane = new THREE.Mesh(new THREE.PlaneGeometry(3.0, 4.6), glowMat);
+        pane.position.set(0, 2.4, 0.01);
+        g.add(pane);
+
+        // ─── Door leaves — two vertical oak panels that hinge outward ───
+        var leafGeo = new THREE.BoxGeometry(1.45, 4.5, 0.15);
+        // Left leaf hinges on its LEFT edge (-x of leaf geometry), so we offset geometry
+        var leafGeoL = new THREE.BoxGeometry(1.45, 4.5, 0.15);
+        leafGeoL.translate(0.725, 0, 0);  // origin at left edge
+        var leafGeoR = new THREE.BoxGeometry(1.45, 4.5, 0.15);
+        leafGeoR.translate(-0.725, 0, 0); // origin at right edge
+
+        var leafL = new THREE.Mesh(leafGeoL, oakMat);
+        leafL.position.set(-1.45, 2.4, 0.05);
+        leafL.castShadow = true;
+        g.add(leafL);
+        var leafR = new THREE.Mesh(leafGeoR, oakMat);
+        leafR.position.set(1.45, 2.4, 0.05);
+        leafR.castShadow = true;
+        g.add(leafR);
+
+        // Simple iron handles / hinges for detail
+        var ironMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(0.15,0.12,0.10), roughness:0.5, metalness:0.8
+        });
+        var knobGeo = new THREE.SphereGeometry(0.09, 10, 8);
+        var knobL = new THREE.Mesh(knobGeo, ironMat); knobL.position.set(1.28, 2.4, 0.10); leafL.add(knobL);
+        var knobR = new THREE.Mesh(knobGeo, ironMat); knobR.position.set(-1.28, 2.4, 0.10); leafR.add(knobR);
+
+        // ─── Dust motes — puff outward when the doors swing open ───
+        var DUST_COUNT = 110;
+        var dustGeo = new THREE.BufferGeometry();
+        var dustPos = new Float32Array(DUST_COUNT * 3);
+        for (var di = 0; di < DUST_COUNT; di++) { dustPos[di*3+1] = -999; }
+        dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+        var dustMat = new THREE.PointsMaterial({
+          color: new THREE.Color(0.82, 0.71, 0.54),
+          size: 0.09, transparent: true, opacity: 0,
+          depthWrite: false, sizeAttenuation: true
+        });
+        var dustPoints = new THREE.Points(dustGeo, dustMat);
+        g.add(dustPoints);
+        this._dustPoints  = dustPoints;
+        this._dustMat     = dustMat;
+        this._dustPosAttr = dustGeo.attributes.position;
+        this._dustVel     = new Float32Array(DUST_COUNT * 3);
+        this._dustLife    = new Float32Array(DUST_COUNT);
+        this._dustCount   = DUST_COUNT;
+        this._dustActiveT = 0;
+
+        // Interior portal light — stays dim until door opens
+        var portalLight = new THREE.PointLight(accentCol.getHex(), 0.0, 14, 1.4);
+        portalLight.position.set(0, 2.6, 0.8); g.add(portalLight);
+
+        // ─── Label above the door ───
+        var canvas = document.createElement('canvas');
+        canvas.width = 512; canvas.height = 128;
+        var ctx = canvas.getContext('2d');
+        ctx.fillStyle = 'rgba(0,0,0,0.0)'; ctx.fillRect(0,0,512,128);
+        ctx.fillStyle = '#' + accentCol.getHexString();
+        ctx.font = '600 48px "Cormorant Garamond", Georgia, serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.shadowColor = '#' + accentCol.getHexString(); ctx.shadowBlur = 18;
+        ctx.fillText(label, 256, 64);
+        var tex = new THREE.CanvasTexture(canvas);
+        tex.anisotropy = 4;
+        var labelMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true });
+        var labelMesh = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 0.8), labelMat);
+        labelMesh.position.set(0, 5.6, 0.1);
+        g.add(labelMesh);
+
+        this.el.setObject3D('door', g);
+        this._pane = pane;
+        this._glowMat = glowMat;
+        this._leafL = leafL;
+        this._leafR = leafR;
+        this._portalLight = portalLight;
+
+        // Animation state
+        this._openProgress = 0;     // 0=closed, 1=open
+        this._state = 'closed';     // closed | opening | open | closing
+        this._prevState = 'closed'; // for rising-edge FX trigger
+        this._rig = document.getElementById('rig');
+        this._worldPos = new THREE.Vector3();
+        this._rigPos = new THREE.Vector3();
+
+        // Listen for portal close (user clicked back) so we can close the doors
+        var self = this;
+        document.addEventListener('portal-closed', function(evt){
+          if (!evt.detail || evt.detail.destination === dest) {
+            self._state = 'closing';
+            self._armedAt = null;  // re-arm so another approach re-opens
+          }
+        });
+
+        // Click still works as a manual trigger (cursor over the door)
+        this.el.setAttribute('class', 'clickable-door');
+        this.el.addEventListener('click', function(){
+          if (self._state === 'closed') self._state = 'opening';
+        });
+      },
+      tick: function(t, dt){
+        var data = this.data;
+
+        // Distance check — only relevant when the chamber is on-screen
+        if (this._state === 'closed' && this.el.object3D.visible) {
+          this.el.object3D.getWorldPosition(this._worldPos);
+          if (this._rig) {
+            this._rig.object3D.getWorldPosition(this._rigPos);
+            var d = this._worldPos.distanceTo(this._rigPos);
+            if (d < data.triggerDistance) this._state = 'opening';
+          }
+        }
+
+        // Rising-edge FX — fire audio + dust burst exactly once when opening begins
+        if (this._state === 'opening' && this._prevState !== 'opening' && this._prevState !== 'open') {
+          this._triggerOpenFX();
+        }
+        this._prevState = this._state;
+
+        // Advance open/close progress
+        var step = (dt || 16) / 1400;  // ~1.4 s to fully open
+        if (this._state === 'opening') {
+          this._openProgress = Math.min(1, this._openProgress + step);
+          if (this._openProgress >= 1) {
+            this._state = 'open';
+            // fire the portal event once doors are fully open
+            var self = this;
+            setTimeout(function(){
+              document.dispatchEvent(new CustomEvent('open-portal', {
+                detail: { destination: data.destination, label: data.label }
+              }));
+            }, 250);
+          }
+        } else if (this._state === 'closing') {
+          this._openProgress = Math.max(0, this._openProgress - step);
+          if (this._openProgress <= 0) this._state = 'closed';
+        }
+
+        // Apply visuals
+        var p = this._openProgress;
+        // ease for nicer motion
+        var ease = p < 0.5 ? 2*p*p : 1 - Math.pow(-2*p+2, 2)/2;
+        var swing = ease * (Math.PI * 0.78);  // open ~140°
+        if (this._leafL) this._leafL.rotation.y =  swing;
+        if (this._leafR) this._leafR.rotation.y = -swing;
+        if (this._glowMat) this._glowMat.opacity = Math.max(0, ease - 0.1) * 0.75;
+        if (this._portalLight) this._portalLight.intensity = ease * 2.4;
+
+        // Subtle idle flicker on the interior light once fully open
+        if (this._state === 'open' && this._portalLight) {
+          this._portalLight.intensity = 2.4 + Math.sin(t * 0.004) * 0.35;
+        }
+
+        // Dust motes — advance positions, drag + settle, fade out
+        if (this._dustActiveT > 0) {
+          var dts = (dt || 16) / 1000;
+          this._dustActiveT += dts;
+          var dpos = this._dustPosAttr.array;
+          var dvel = this._dustVel;
+          var dlife = this._dustLife;
+          var dn = this._dustCount;
+          var anyAlive = false;
+          for (var k = 0; k < dn; k++) {
+            if (dlife[k] <= 0) continue;
+            var k3 = k * 3;
+            dpos[k3]   += dvel[k3]   * dts;
+            dpos[k3+1] += dvel[k3+1] * dts;
+            dpos[k3+2] += dvel[k3+2] * dts;
+            dvel[k3]   *= 0.955;
+            dvel[k3+2] *= 0.955;
+            dvel[k3+1] = dvel[k3+1] * 0.985 - 0.18 * dts;
+            dlife[k] -= dts;
+            if (dlife[k] > 0) anyAlive = true;
+          }
+          this._dustPosAttr.needsUpdate = true;
+          var dt01 = Math.min(1, this._dustActiveT / 2.0);
+          this._dustMat.opacity = 0.80 * (1 - dt01 * dt01);
+          if (!anyAlive || this._dustActiveT > 2.2) {
+            this._dustActiveT = 0;
+            this._dustMat.opacity = 0;
+          }
+        }
+      },
+
+      // Fire audio cue + dust burst once per door-open event
+      _triggerOpenFX: function(){
+        try { window.dispatchEvent(new CustomEvent('door-open-sound')); } catch(e){}
+        if (!this._dustPosAttr) return;
+        var n = this._dustCount;
+        var pos = this._dustPosAttr.array;
+        var vel = this._dustVel;
+        var life = this._dustLife;
+        for (var i = 0; i < n; i++) {
+          var i3 = i * 3;
+          var xSeed = (Math.random() - 0.5) * 2.2;
+          pos[i3]   = xSeed;
+          pos[i3+1] = 0.3 + Math.random() * 4.3;
+          pos[i3+2] = 0.15 + Math.random() * 0.15;
+          var dir = xSeed >= 0 ? 1 : -1;
+          vel[i3]   = dir * (0.5 + Math.random() * 1.1);
+          vel[i3+1] = 0.25 + Math.random() * 0.6;
+          vel[i3+2] = 0.3  + Math.random() * 0.6;
+          life[i]   = 1.3  + Math.random() * 1.0;
+        }
+        this._dustPosAttr.needsUpdate = true;
+        this._dustMat.opacity = 0.80;
+        this._dustActiveT = 0.001;
+      }
+    });
+
+    /* Slow camera dolly once the chamber is revealed */
+    AFRAME.registerComponent('stone-reveal', {
+      init: function(){
+        this._active = false;
+        this._t0 = 0;
+      },
+      trigger: function(){
+        this._active = true;
+        this._t0 = performance.now();
+      },
+      tick: function(t){
+        if (!this._active) return;
+        var rig = document.getElementById('rig');
+        if (!rig) return;
+        var elapsed = performance.now() - this._t0;
+        var dur = 11000;
+        var p = Math.min(1, elapsed / dur);
+        var ease = p < 0.5 ? 2*p*p : 1 - Math.pow(-2*p+2,2)/2;
+        // Dolly from (0,1.6,-6) in toward the stone at (0, 1.2, CW-4.2≈17.8)
+        var z0 = -6, z1 = 12;
+        rig.object3D.position.z = z0 + (z1 - z0) * ease;
+        rig.object3D.position.y = 1.6 + Math.sin(p * Math.PI) * 0.3;
+      }
+    });
+
+    /* Starfield — a sphere of bright Points far away */
+    AFRAME.registerComponent('starfield', {
+      init: function(){
+        var geo = new THREE.BufferGeometry();
+        var count = 1400;
+        var pos = new Float32Array(count * 3);
+        var col = new Float32Array(count * 3);
+        for (var i = 0; i < count; i++) {
+          var theta = Math.random() * Math.PI * 2;
+          var phi = Math.acos(2 * Math.random() - 1);
+          var r = 220 + Math.random() * 20;
+          pos[i*3+0] = r * Math.sin(phi) * Math.cos(theta);
+          pos[i*3+1] = Math.abs(r * Math.cos(phi)) * 0.85 + 20;  // keep stars above horizon mostly
+          pos[i*3+2] = r * Math.sin(phi) * Math.sin(theta);
+          var b = 0.55 + Math.random() * 0.45;
+          // slight color variation: some stars warmer, some cooler
+          var tint = Math.random();
+          col[i*3+0] = b * (tint < 0.3 ? 1.0 : 0.85);
+          col[i*3+1] = b * 0.92;
+          col[i*3+2] = b * (tint > 0.7 ? 1.0 : 0.85);
+        }
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+        var mat = new THREE.PointsMaterial({
+          size: 1.1, vertexColors: true, sizeAttenuation: true,
+          transparent: true, opacity: 0.9, depthWrite: false
+        });
+        var stars = new THREE.Points(geo, mat);
+        this.el.setObject3D('stars', stars);
+        this._stars = stars;
+      },
+      tick: function(t){
+        if (!this._stars) return;
+        // subtle twinkle
+        this._stars.material.opacity = 0.75 + Math.sin(t * 0.0008) * 0.1;
+      }
+    });
+
+    /* Renderer setup */
+    AFRAME.registerComponent('render-setup',{
+      init:function(){
+        this.el.addEventListener('loaded',function(){
+          var r=this.renderer;
+          r.toneMapping=THREE.ACESFilmicToneMapping;
+          r.toneMappingExposure=1.8;
+          r.shadowMap.enabled=true;
+          r.shadowMap.type=THREE.PCFSoftShadowMap;
+        });
+      }
+    });
+  </script>
+
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{background:#000;overflow:hidden;font-family:'Inter','Helvetica Neue',sans-serif}
+
+    /* ════════════════════════════════════════════
+       MAX MCDONOUGH DESIGNS — CINEMATIC TITLE CARD
+       Dark, quiet, with slow-rising ember particles
+       ════════════════════════════════════════════ */
+    #mmdIntro{
+      position:fixed;inset:0;z-index:10000;
+      background:#000;
+      display:flex;align-items:center;justify-content:center;flex-direction:column;
+      opacity:1;transition:opacity 1.4s ease;
+      overflow:hidden;
+      font-family:'Cormorant Garamond','Georgia',serif;
+    }
+    #mmdIntro.gone{opacity:0;pointer-events:none}
+
+    /* radial warm vignette */
+    #mmdIntro::before{
+      content:'';position:absolute;inset:0;
+      background:radial-gradient(ellipse at center,rgba(60,30,10,.18) 0%,transparent 60%);
+      pointer-events:none;
+    }
+
+    /* golden ember particles */
+    .embers{position:absolute;inset:0;pointer-events:none}
+    .ember{
+      position:absolute;bottom:-10px;width:2px;height:2px;border-radius:50%;
+      background:#ffb560;box-shadow:0 0 6px 1px rgba(255,180,80,.55);
+      opacity:0;
+      animation-name:emberRise;
+      animation-timing-function:linear;
+      animation-iteration-count:infinite;
+    }
+    @keyframes emberRise{
+      0%{opacity:0;transform:translate(0,0) scale(1)}
+      10%{opacity:1}
+      90%{opacity:.6}
+      100%{opacity:0;transform:translate(var(--sway,0),-105vh) scale(.4)}
+    }
+
+    /* two-stage title: MMD card then WIZARD'S CHESS card */
+    .card{
+      position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+      flex-direction:column;text-align:center;color:#c9b68a;
+      opacity:0;
+    }
+    .card.card-1{animation:cardA 4.3s .4s ease forwards}
+    .card.card-2{animation:cardB 4.5s 4.5s ease forwards}
+
+    @keyframes cardA{
+      0%{opacity:0;transform:translateY(6px)}
+      18%{opacity:1;transform:translateY(0)}
+      78%{opacity:1}
+      100%{opacity:0;transform:translateY(-4px)}
+    }
+    @keyframes cardB{
+      0%{opacity:0;transform:translateY(6px)}
+      14%{opacity:1;transform:translateY(0)}
+      82%{opacity:1}
+      100%{opacity:0}
+    }
+
+    .card .maker{
+      font-weight:400;font-size:1.8rem;letter-spacing:.55em;
+      text-transform:uppercase;color:#ffd080;
+      text-shadow:0 0 20px rgba(255,210,130,.8),0 0 40px rgba(255,180,80,.35);
+      padding-left:.55em; /* optical centering for letter-spacing */
+    }
+    .card .presents{
+      margin-top:1.2em;font-style:italic;font-size:.95rem;color:#c29a60;
+      letter-spacing:.25em;opacity:1;
+      text-shadow:0 0 12px rgba(230,180,110,.5);
+    }
+
+    .card .title{
+      font-weight:400;font-size:4.6rem;letter-spacing:.38em;
+      text-transform:uppercase;color:#ffe0a8;
+      text-shadow:0 0 30px rgba(255,220,150,.7),0 0 60px rgba(255,180,80,.35);
+      padding-left:.38em;
+    }
+    .card .subtitle{
+      margin-top:1.4em;font-size:.82rem;letter-spacing:.4em;
+      text-transform:uppercase;color:#d4a870;font-weight:400;
+      padding-left:.4em;
+      text-shadow:0 0 14px rgba(230,180,110,.45);
+    }
+    .card .hairline{
+      margin-top:1.3em;height:1px;width:120px;
+      background:linear-gradient(90deg,transparent,rgba(230,180,110,.5),transparent);
+    }
+
+    /* ═══ NARRATIVE CAPTIONS during the chess game ═══ */
+    .caption{
+      position:fixed;left:50%;bottom:14%;transform:translateX(-50%);
+      z-index:200;color:#d6c59a;
+      font-family:'Cormorant Garamond',Georgia,serif;
+      font-size:1.15rem;letter-spacing:.18em;text-transform:uppercase;
+      text-align:center;
+      text-shadow:0 2px 20px rgba(0,0,0,.9);
+      opacity:0;transition:opacity 1.2s ease;
+      pointer-events:none;
+      max-width:80vw;
+    }
+    .caption.show{opacity:1}
+    .caption .whisper{
+      display:block;margin-top:.4em;font-size:.72rem;
+      letter-spacing:.32em;opacity:.55;font-style:italic;
+    }
+
+    /* ═══ SCENE TRANSITION BLACK ═══ */
+    #blackout{
+      position:fixed;inset:0;z-index:9998;background:#000;
+      opacity:0;pointer-events:none;transition:opacity 1.6s ease;
+    }
+    #blackout.on{opacity:1;pointer-events:auto}
+
+    /* ═══ STONE CHAMBER OVERLAY CAPTIONS ═══ */
+    #stoneTitle{
+      position:fixed;left:50%;top:62%;transform:translate(-50%,-50%);
+      z-index:210;color:#e7d7a7;
+      font-family:'Cormorant Garamond',Georgia,serif;
+      font-size:2.4rem;font-weight:300;letter-spacing:.38em;
+      text-transform:uppercase;text-align:center;
+      opacity:0;transition:opacity 2s ease;
+      text-shadow:0 0 30px rgba(230,150,80,.45);
+      pointer-events:none;
+      padding-left:.38em;
+    }
+    #stoneTitle.show{opacity:1}
+    #stoneTitle .tagline{
+      display:block;margin-top:.6em;font-size:.72rem;letter-spacing:.42em;
+      color:#c9a871;font-style:italic;opacity:.8;
+    }
+
+    /* ═══ SKETCHFAB PORTAL OVERLAY ═══ */
+    #portal-overlay{
+      position:fixed;inset:0;z-index:9997;background:#000;
+      display:none;flex-direction:column;
+      opacity:0;transition:opacity 0.8s ease;
+    }
+    #portal-overlay.open{display:flex;opacity:1}
+    #portal-overlay .portal-header{
+      position:absolute;top:0;left:0;right:0;z-index:2;
+      display:flex;align-items:center;justify-content:space-between;
+      padding:14px 22px;
+      background:linear-gradient(180deg,rgba(0,0,0,.85),rgba(0,0,0,0));
+      color:#e7d7a7;font-family:'Cormorant Garamond',Georgia,serif;
+      pointer-events:none;
+    }
+    #portal-overlay .portal-title{
+      font-size:1.1rem;letter-spacing:.35em;text-transform:uppercase;
+      text-shadow:0 0 16px rgba(255,210,130,.5);
+    }
+    #portal-overlay .portal-back{
+      pointer-events:auto;cursor:pointer;
+      background:rgba(20,15,10,.6);border:1px solid rgba(230,180,110,.35);
+      color:#ffd080;padding:10px 20px;border-radius:3px;
+      font-family:'Cormorant Garamond',Georgia,serif;
+      font-size:.72rem;letter-spacing:.3em;text-transform:uppercase;
+      transition:background .2s,transform .2s;
+    }
+    #portal-overlay .portal-back:hover{
+      background:rgba(40,30,20,.9);transform:translateX(-3px);
+    }
+    #portal-overlay iframe{
+      flex:1;width:100%;height:100%;border:0;background:#000;
+    }
+
+    #hud{
+      position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:100;
+      font-family:Georgia,serif;color:rgba(140,160,180,.5);font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;
+      background:rgba(0,0,0,.55);padding:8px 20px;border-radius:3px;
+      backdrop-filter:blur(6px);border:1px solid rgba(140,160,140,.06);
+      opacity:0;transition:opacity 2s ease;
+    }
+    #hud.fade{opacity:0!important;pointer-events:none}
+    #vig{position:fixed;inset:0;z-index:50;pointer-events:none;
+      background:radial-gradient(ellipse at center,transparent 45%,rgba(0,0,10,.55) 100%)}
+  </style>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<!-- Max McDonough Designs — dark cinematic title card with rising embers -->
+<div id="mmdIntro">
+  <div class="embers" id="emberField"></div>
+  <div class="card card-1">
+    <div class="maker">Max McDonough Designs</div>
+    <div class="hairline"></div>
+    <div class="presents">— presents —</div>
+  </div>
+  <div class="card card-2">
+    <div class="title">Wizard's Chess</div>
+    <div class="subtitle">The Path to the Philosopher's Stone</div>
+  </div>
+</div>
+
+<!-- Narrative overlays -->
+<div class="caption" id="cap"></div>
+<div id="blackout"></div>
+<div id="stoneTitle"></div>
+
+<!-- Sketchfab portal overlay — steps into the Great Hall / Dumbledore's Office -->
+<div id="portal-overlay">
+  <div class="portal-header">
+    <div class="portal-title" id="portal-title">Portal</div>
+    <button class="portal-back" id="portal-back">&#x2190; Back to the Chamber</button>
+  </div>
+  <iframe id="portal-iframe" allow="autoplay; fullscreen; xr-spatial-tracking" allowfullscreen></iframe>
+</div>
+<div id="vig"></div>
+<div id="hud">WASD move · Mouse look · Q up · E down</div>
+
+<a-scene
+  renderer="antialias:true; colorManagement:true; physicallyCorrectLights:true"
+  vr-mode-ui="enabled:false"
+  loading-screen="enabled:false"
+  fog="type:exponential; color:#020210; density:0.0025"
+  shadow="type:pcfsoft"
+  render-setup
+  chess-game
+>
+  <a-assets timeout="45000">
+    <a-asset-item id="castle-glb" src="hogwarts_ny7.glb"></a-asset-item>
+    <!-- Original "printable" set — preserved and now used for the trophies in the chamber -->
+    <a-asset-item id="king-printable"   src="King_printable.glb"></a-asset-item>
+    <a-asset-item id="queen-printable"  src="Queen_printable.glb"></a-asset-item>
+    <a-asset-item id="bishop-printable" src="Bishop_printable.glb"></a-asset-item>
+    <a-asset-item id="knight-printable" src="Knight_printable.glb"></a-asset-item>
+    <!-- New Max McDonough "magnet" set — the primary gameplay pieces -->
+    <a-asset-item id="king-glb"   src="King_magnet.glb"></a-asset-item>
+    <a-asset-item id="queen-glb"  src="Queen_magnet.glb"></a-asset-item>
+    <a-asset-item id="bishop-glb" src="Bishop_magnet.glb"></a-asset-item>
+    <a-asset-item id="knight-glb" src="Knight_magnet.glb"></a-asset-item>
+    <a-asset-item id="rook-glb"   src="Rook_magnet.glb"></a-asset-item>
+    <a-asset-item id="pawn-glb"   src="Pawn_magnet.glb"></a-asset-item>
+  </a-assets>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!--  HOGWARTS CASTLE — NY7 model (Y-up, centered X/Z)      -->
+  <!--  Native: 172(X) x 121(Y-height) x 240(Z)              -->
+  <!--  Scale 0.2 → 34 x 24 x 48 world units                 -->
+  <!--  Board (20x20) centered inside the castle footprint    -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- Castle positioned as a backdrop behind the chess board on open ground -->
+  <!-- Board stays at world origin; castle pushed back in +Z with bottom at Y=0 -->
+  <a-entity
+    gltf-model="#castle-glb"
+    school-material
+    position="0 0 38"
+    rotation="0 0 0"
+    scale="0.22 0.22 0.22"
+  ></a-entity>
+
+  <!-- STONE CHAMBER — disabled; board now sits on the castle's own courtyard plaza -->
+  <!-- <a-entity stone-chamber></a-entity> -->
+
+  <!-- Subtle stone platform under the board (just a touch of bedding) -->
+  <a-entity position="0 -0.05 0">
+    <a-box width="22" height="0.1" depth="22"
+      material="color:#0a0a12; roughness:0.95; metalness:0.02"
+      shadow="receive:true"></a-box>
+  </a-entity>
+
+  <!-- Dark ground beneath everything -->
+  <a-plane position="0 -0.55 0" rotation="-90 0 0" width="250" height="250"
+    material="color:#040410; roughness:0.92; metalness:0.02"
+    shadow="receive:true"></a-plane>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!--  WIZARD'S CHESSBOARD — in the courtyard                -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <a-entity position="0 0.05 0" wizard-chessboard="size:8; squareSize:2.5"></a-entity>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!--  CHESS PIECES — giant, like the movie                  -->
+  <!--  IDs used by chess-game component for animation        -->
+  <!--  sq = squareSize 2.5, positions = (col-4+0.5)*2.5     -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- DARK SIDE (far/north, z = -8.75 back row, -6.25 pawns) -->
+  <!-- Back row -->
+  <!-- King's sword — rests on the black king, falls at checkmate -->
+  <a-entity id="dk-sword" kings-sword position="1.25 2.35 -8.75"></a-entity>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!--  CHARACTER SILHOUETTES — scaled as riders atop pieces   -->
+  <!--  Ron rides the knight that sacrifices itself (lk-g)     -->
+  <!--  Harry rides the bishop that delivers checkmate (lb-f)  -->
+  <!--  Hermione stands on the rook (lr-a)                     -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <a-entity id="char-hermione" student="who:hermione" scale="0.75 0.75 0.75" follow-piece="target:#lr-a; offset:0 1.9 0"></a-entity>
+  <a-entity id="char-ron"      student="who:ron"      scale="0.75 0.75 0.75" follow-piece="target:#lk-g; offset:0 2.0 0"></a-entity>
+  <a-entity id="char-harry"    student="who:harry"    scale="0.75 0.75 0.75" follow-piece="target:#lb-f; offset:0 2.0 0"></a-entity>
+
+  <a-entity id="dr-a" gltf-model="#rook-glb"   position="-8.75 0.1 -8.75" chess-material="color:dark"></a-entity>
+  <a-entity id="dk-b" gltf-model="#knight-glb" position="-6.25 0.1 -8.75" chess-material="color:dark"></a-entity>
+  <a-entity id="db-c" gltf-model="#bishop-glb" position="-3.75 0.1 -8.75" chess-material="color:dark"></a-entity>
+  <a-entity id="dq"   gltf-model="#queen-glb"  position="-1.25 0.1 -8.75" chess-material="color:dark"></a-entity>
+  <a-entity id="dk"   gltf-model="#king-glb"   position=" 1.25 0.1 -8.75" chess-material="color:dark"></a-entity>
+  <a-entity id="db-f" gltf-model="#bishop-glb" position=" 3.75 0.1 -8.75" chess-material="color:dark"></a-entity>
+  <a-entity id="dk-g" gltf-model="#knight-glb" position=" 6.25 0.1 -8.75" chess-material="color:dark"></a-entity>
+  <a-entity id="dr-h" gltf-model="#rook-glb"   position=" 8.75 0.1 -8.75" chess-material="color:dark"></a-entity>
+  <!-- Pawns -->
+  <a-entity id="bp-a" gltf-model="#pawn-glb" position="-8.75 0.1 -6.25" chess-material="color:dark"></a-entity>
+  <a-entity id="bp-b" gltf-model="#pawn-glb" position="-6.25 0.1 -6.25" chess-material="color:dark"></a-entity>
+  <a-entity id="bp-c" gltf-model="#pawn-glb" position="-3.75 0.1 -6.25" chess-material="color:dark"></a-entity>
+  <a-entity id="bp-d" gltf-model="#pawn-glb" position="-1.25 0.1 -6.25" chess-material="color:dark"></a-entity>
+  <a-entity id="bp-e" gltf-model="#pawn-glb" position=" 1.25 0.1 -6.25" chess-material="color:dark"></a-entity>
+  <a-entity id="bp-f" gltf-model="#pawn-glb" position=" 3.75 0.1 -6.25" chess-material="color:dark"></a-entity>
+  <a-entity id="bp-g" gltf-model="#pawn-glb" position=" 6.25 0.1 -6.25" chess-material="color:dark"></a-entity>
+  <a-entity id="bp-h" gltf-model="#pawn-glb" position=" 8.75 0.1 -6.25" chess-material="color:dark"></a-entity>
+
+  <!-- LIGHT SIDE (near/south, z = 8.75 back row, 6.25 pawns) -->
+  <!-- Pawns -->
+  <a-entity id="wp-a" gltf-model="#pawn-glb" position="-8.75 0.1 6.25" chess-material="color:light"></a-entity>
+  <a-entity id="wp-b" gltf-model="#pawn-glb" position="-6.25 0.1 6.25" chess-material="color:light"></a-entity>
+  <a-entity id="wp-c" gltf-model="#pawn-glb" position="-3.75 0.1 6.25" chess-material="color:light"></a-entity>
+  <a-entity id="wp-d" gltf-model="#pawn-glb" position="-1.25 0.1 6.25" chess-material="color:light"></a-entity>
+  <a-entity id="wp-e" gltf-model="#pawn-glb" position=" 1.25 0.1 6.25" chess-material="color:light"></a-entity>
+  <a-entity id="wp-f" gltf-model="#pawn-glb" position=" 3.75 0.1 6.25" chess-material="color:light"></a-entity>
+  <a-entity id="wp-g" gltf-model="#pawn-glb" position=" 6.25 0.1 6.25" chess-material="color:light"></a-entity>
+  <a-entity id="wp-h" gltf-model="#pawn-glb" position=" 8.75 0.1 6.25" chess-material="color:light"></a-entity>
+  <!-- Back row -->
+  <a-entity id="lr-a"    gltf-model="#rook-glb"   position="-8.75 0.1 8.75" chess-material="color:light"></a-entity>
+  <a-entity id="lk-b"    gltf-model="#knight-glb" position="-6.25 0.1 8.75" chess-material="color:light"></a-entity>
+  <a-entity id="lb-c"    gltf-model="#bishop-glb" position="-3.75 0.1 8.75" chess-material="color:light"></a-entity>
+  <a-entity id="lq"      gltf-model="#queen-glb"  position="-1.25 0.1 8.75" chess-material="color:light"></a-entity>
+  <a-entity id="lk-king" gltf-model="#king-glb"   position=" 1.25 0.1 8.75" chess-material="color:light"></a-entity>
+  <a-entity id="lb-f"    gltf-model="#bishop-glb" position=" 3.75 0.1 8.75" chess-material="color:light"></a-entity>
+  <a-entity id="lk-g"    gltf-model="#knight-glb" position=" 6.25 0.1 8.75" chess-material="color:light"></a-entity>
+  <a-entity id="lr-h"    gltf-model="#rook-glb"   position=" 8.75 0.1 8.75" chess-material="color:light"></a-entity>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!--  FIRE BRAZIERS — 4 corners of board like the movie     -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- Plaza-corner braziers hugging the board edge -->
+  <a-entity position="-11 0 -11" brazier>
+    <a-light type="point" color="#FF8822" distance="18" decay="1.6" position="0 1.3 0" flicker="base:1.6;range:0.5;speed:8"></a-light>
+  </a-entity>
+  <a-entity position="11 0 -11" brazier>
+    <a-light type="point" color="#FF8822" distance="18" decay="1.6" position="0 1.3 0" flicker="base:1.5;range:0.45;speed:9"></a-light>
+  </a-entity>
+  <a-entity position="-11 0 11" brazier>
+    <a-light type="point" color="#FF9933" distance="18" decay="1.6" position="0 1.3 0" flicker="base:1.4;range:0.4;speed:10"></a-light>
+  </a-entity>
+  <a-entity position="11 0 11" brazier>
+    <a-light type="point" color="#FF9933" distance="18" decay="1.6" position="0 1.3 0" flicker="base:1.5;range:0.5;speed:7"></a-light>
+  </a-entity>
+  <!-- Elevated torches on castle walls flanking the plaza -->
+  <a-entity position="-14 5 -4" brazier>
+    <a-light type="point" color="#FF7711" distance="22" decay="1.7" position="0 1.3 0" flicker="base:1.3;range:0.4;speed:7"></a-light>
+  </a-entity>
+  <a-entity position="-14 5 4" brazier>
+    <a-light type="point" color="#FF7711" distance="22" decay="1.7" position="0 1.3 0" flicker="base:1.2;range:0.35;speed:9"></a-light>
+  </a-entity>
+  <a-entity position="14 5 -4" brazier>
+    <a-light type="point" color="#FF7711" distance="22" decay="1.7" position="0 1.3 0" flicker="base:1.4;range:0.4;speed:8"></a-light>
+  </a-entity>
+  <a-entity position="14 5 4" brazier>
+    <a-light type="point" color="#FF7711" distance="22" decay="1.7" position="0 1.3 0" flicker="base:1.1;range:0.45;speed:11"></a-light>
+  </a-entity>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!--  LIGHTING                                              -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- Strong moonlight from above-left -->
+  <a-light type="directional" color="#5577DD" intensity="5.0"
+    position="-10 30 -15" cast-shadow="true"
+    shadow-camera-left="-30" shadow-camera-right="30"
+    shadow-camera-top="30" shadow-camera-bottom="-30"
+    shadow-map-height="2048" shadow-map-width="2048"></a-light>
+
+  <!-- Blue fill from the right -->
+  <a-light type="directional" color="#3355AA" intensity="2.0"
+    position="15 20 10"></a-light>
+
+  <!-- Board overhead glow — dramatic spotlight on the game -->
+  <a-light type="point" color="#8899DD" intensity="2.0" distance="25" decay="1.5" position="0 10 0"></a-light>
+
+  <!-- Ambient -->
+  <a-light type="ambient" color="#101828" intensity="0.6"></a-light>
+
+  <!-- ═══ STONE CHAMBER (Mirror of Erised) — hidden until after checkmate ═══ -->
+  <a-entity id="stoneChamber" stone-chamber-inner stone-reveal visible="false">
+    <!-- warm key lights -->
+    <a-light type="point" color="#ffc878" intensity="6.0" distance="40" decay="1.4" position="0 10 0"></a-light>
+    <a-light type="point" color="#ffa858" intensity="3.5" distance="28" decay="1.5" position="0 6 -10"></a-light>
+    <a-light type="ambient" color="#4a3824" intensity="1.4"></a-light>
+    <!-- torches flanking the mirror -->
+    <a-entity position="-8 0 18" brazier>
+      <a-light type="point" color="#ff7d28" distance="14" decay="1.8" position="0 1.3 0" flicker="base:1.2;range:0.4;speed:8"></a-light>
+    </a-entity>
+    <a-entity position="8 0 18" brazier>
+      <a-light type="point" color="#ff7d28" distance="14" decay="1.8" position="0 1.3 0" flicker="base:1.2;range:0.4;speed:9"></a-light>
+    </a-entity>
+    <a-entity position="-14 0 0" brazier>
+      <a-light type="point" color="#ff8a3a" distance="14" decay="1.8" position="0 1.3 0" flicker="base:1.1;range:0.35;speed:7"></a-light>
+    </a-entity>
+    <a-entity position="14 0 0" brazier>
+      <a-light type="point" color="#ff8a3a" distance="14" decay="1.8" position="0 1.3 0" flicker="base:1.1;range:0.35;speed:10"></a-light>
+    </a-entity>
+
+    <!-- Four chess piece trophies on pedestals — the original printable set preserved -->
+    <a-entity id="trophy-king"   gltf-model="#king-printable"   position="-8 2.6 16.5" scale=".4 .4 .4" chess-material="color:light"></a-entity>
+    <a-entity id="trophy-queen"  gltf-model="#queen-printable"  position=" 8 2.6 16.5" scale=".4 .4 .4" chess-material="color:light"></a-entity>
+    <a-entity id="trophy-bishop" gltf-model="#bishop-printable" position="-5 2.6 12.5" scale=".4 .4 .4" chess-material="color:dark"></a-entity>
+    <a-entity id="trophy-knight" gltf-model="#knight-printable" position=" 5 2.6 12.5" scale=".4 .4 .4" chess-material="color:dark"></a-entity>
+
+    <!-- Two additional doorways flanking the Mirror of Erised -->
+    <a-entity portal-door="label:THE GREAT HALL; destination:great-hall; accent:#f3b247"
+              position="-18 0 6" rotation="0 90 0"></a-entity>
+    <a-entity portal-door="label:DUMBLEDORE'S OFFICE; destination:dumbledores-office; accent:#8ecbff"
+              position=" 18 0 6" rotation="0 -90 0"></a-entity>
+  </a-entity>
+
+  <!-- Night sky gradient -->
+  <a-sky material="shader:flat; color:#02020a"></a-sky>
+
+  <!-- Starfield -->
+  <a-entity starfield></a-entity>
+
+  <!-- Moon: big soft disc behind the castle, blooming through fog -->
+  <a-entity position="35 38 120">
+    <a-sphere radius="10"
+      material="shader:flat; color:#E4E9F2; emissive:#FFFFFF"></a-sphere>
+    <a-sphere radius="14"
+      material="shader:flat; color:#A8B4D0; opacity:0.25; transparent:true"></a-sphere>
+    <a-sphere radius="22"
+      material="shader:flat; color:#6677AA; opacity:0.08; transparent:true"></a-sphere>
+  </a-entity>
+
+  <!-- Cold moon key-light from moon direction -->
+  <a-light type="directional" color="#AABBEE" intensity="0.8"
+    position="35 38 120"></a-light>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!--  CAMERA RIG                                            -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <a-entity id="rig"
+    wasd-controls="acceleration:22; fly:true; enabled:false"
+    fly-controls="speed:10"
+    flyover
+    boundary="minX:-30; maxX:30; minZ:-30; maxZ:30; minY:0.5; maxY:20">
+    <a-camera look-controls="pointerLockEnabled:false; magicWindowTrackingEnabled:false; enabled:false"
+      fov="65" near="0.1" far="500">
+      <a-cursor raycaster="objects: .clickable-door; far: 60" fuse="false"
+        material="color: #ffd080; shader: flat; opacity: 0.55"
+        geometry="primitive: ring; radiusInner: 0.008; radiusOuter: 0.012"
+        position="0 0 -1"></a-cursor>
+    </a-camera>
+  </a-entity>
+
+</a-scene>
+
+<script>
+  // ═══ HEDWIG'S THEME — celesta arrangement of the Harry Potter main motif ═══
+  // Notes transcribed in E-minor, 3/8 time, quarter = 1 beat.
+  // [midi, startBeatFromPhraseStart, durationBeats]
+  (function(){
+    var ctx = null, master = null, filter = null, started = false;
+    var BPM = 112;                       // 112 bpm — gentle, cinematic tempo
+    var beat = 60 / BPM;                 // seconds per quarter
+
+    // Iconic opening, then the answering phrase, then an echo repeat.
+    // Pitches: B4=71 D#5=75 E5=76 F5=77 F#5=78 G5=79 A5=81 B5=83 C6=84 D6=86 E6=88
+    var PHRASE = [
+      // --- Phrase 1 (the famous opening) ---
+      [71, 0.00, 0.50],                  // B4  pickup 8th
+      [76, 0.50, 1.50],                  // E5  dotted quarter
+      [79, 2.00, 0.50],                  // G5  8th
+      [78, 2.50, 1.00],                  // F#5 quarter
+      [76, 3.50, 1.00],                  // E5  quarter
+      [83, 4.50, 1.00],                  // B5  quarter  (the leap up)
+      [81, 5.50, 1.50],                  // A5  dotted quarter
+      [78, 7.00, 3.00],                  // F#5 dotted half (hold)
+      // --- Phrase 2 (descending answer) ---
+      [76,10.00, 0.50],                  // E5
+      [79,10.50, 0.50],                  // G5
+      [78,11.00, 0.50],                  // F#5
+      [75,11.50, 1.00],                  // D#5 quarter
+      [77,12.50, 0.50],                  // F5
+      [71,13.00, 2.00],                  // B4  half (hold)
+      // --- Phrase 3 (answer ascending — the "aha" resolution) ---
+      [71,15.00, 0.50],                  // B4  pickup
+      [76,15.50, 1.50],                  // E5
+      [79,17.00, 0.50],                  // G5
+      [78,17.50, 1.00],                  // F#5
+      [76,18.50, 1.00],                  // E5
+      [86,19.50, 1.00],                  // D6  big leap
+      [84,20.50, 1.50],                  // C6
+      [83,22.00, 3.00],                  // B5  dotted half resolve
+      // --- small tag descending back to the start ---
+      [81,25.00, 0.50],
+      [79,25.50, 0.50],
+      [78,26.00, 1.00],
+      [76,27.00, 2.50]
+    ];
+    var PHRASE_BEATS = 30;               // total length so loop spaces cleanly
+
+    function midi2hz(m){ return 440 * Math.pow(2, (m - 69) / 12); }
+
+    // Celesta-ish bell voice: sine fundamental + sine 2x octave + weak 3x; exp decay.
+    function playNote(time, midi, dur){
+      var f = midi2hz(midi);
+      var g = ctx.createGain();
+      g.gain.setValueAtTime(0, time);
+      g.gain.linearRampToValueAtTime(0.22, time + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0006, time + Math.min(2.8, dur * 1.4));
+
+      function osc(type, freq, level){
+        var o = ctx.createOscillator();
+        o.type = type;
+        o.frequency.value = freq;
+        var lg = ctx.createGain(); lg.gain.value = level;
+        o.connect(lg); lg.connect(g);
+        o.start(time); o.stop(time + Math.min(3.2, dur * 1.6));
+        return o;
+      }
+
+      osc('sine',     f,      0.55);     // fundamental
+      osc('sine',     f * 2,  0.28);     // 1st octave shimmer
+      osc('triangle', f * 3,  0.10);     // slight metallic bite
+      osc('sine',     f * 0.5,0.18);     // sub warmth
+
+      g.connect(filter);
+    }
+
+    function scheduleLoop(offset){
+      var t0 = ctx.currentTime + offset;
+      for (var i = 0; i < PHRASE.length; i++){
+        var n = PHRASE[i];
+        playNote(t0 + n[1] * beat, n[0], n[2] * beat);
+      }
+      var total = (PHRASE_BEATS + 2) * beat; // add breathing space between loops
+      setTimeout(function(){ if (started) scheduleLoop(0); }, total * 1000);
+    }
+
+    function start(){
+      if (started) return;
+      started = true;
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      master = ctx.createGain();
+      master.gain.value = 0.38;
+
+      // warm low-pass for the bell voice
+      filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 4200;
+      filter.Q.value = 0.5;
+      filter.connect(master);
+
+      // stereo-ish reverb via two feedback delays
+      var d1 = ctx.createDelay(1.5); d1.delayTime.value = 0.19;
+      var d2 = ctx.createDelay(1.5); d2.delayTime.value = 0.33;
+      var dg1 = ctx.createGain(); dg1.gain.value = 0.30;
+      var dg2 = ctx.createGain(); dg2.gain.value = 0.22;
+      master.connect(ctx.destination);
+      master.connect(d1); d1.connect(dg1); dg1.connect(ctx.destination); dg1.connect(d2);
+      d2.connect(dg2); dg2.connect(ctx.destination);
+
+      // try to resume (Safari/Chrome autoplay policy may require a gesture)
+      if (ctx.state === 'suspended') ctx.resume();
+      scheduleLoop(0.4);
+    }
+
+    // ─── Door-open SFX: low wooden thud + squealing hinge creak ───
+    function playDoorSound(){
+      if (!started) { try { start(); } catch(e){ return; } }
+      if (!ctx || !master) return;
+      var now = ctx.currentTime;
+
+      // Wooden thud — pitch-drop sine + filtered noise body
+      var thudG = ctx.createGain();
+      thudG.gain.setValueAtTime(0.0001, now);
+      thudG.gain.linearRampToValueAtTime(0.55, now + 0.006);
+      thudG.gain.exponentialRampToValueAtTime(0.0008, now + 0.45);
+      thudG.connect(master);
+      var thudOsc = ctx.createOscillator();
+      thudOsc.type = 'sine';
+      thudOsc.frequency.setValueAtTime(95, now);
+      thudOsc.frequency.exponentialRampToValueAtTime(36, now + 0.35);
+      thudOsc.connect(thudG);
+      thudOsc.start(now); thudOsc.stop(now + 0.5);
+
+      var nBuf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.28), ctx.sampleRate);
+      var nD = nBuf.getChannelData(0);
+      for (var i = 0; i < nD.length; i++) nD[i] = (Math.random()*2-1) * (1 - i/nD.length);
+      var noise = ctx.createBufferSource(); noise.buffer = nBuf;
+      var nFilt = ctx.createBiquadFilter();
+      nFilt.type = 'lowpass'; nFilt.frequency.value = 220; nFilt.Q.value = 0.7;
+      var nG = ctx.createGain();
+      nG.gain.setValueAtTime(0.35, now);
+      nG.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+      noise.connect(nFilt); nFilt.connect(nG); nG.connect(master);
+      noise.start(now);
+
+      // Hinge creak — bandpassed sawtooth with slow pitch rise + vibrato
+      var cStart = now + 0.08;
+      var cDur = 1.05;
+      var creakG = ctx.createGain();
+      creakG.gain.setValueAtTime(0.0001, cStart);
+      creakG.gain.linearRampToValueAtTime(0.12, cStart + 0.12);
+      creakG.gain.linearRampToValueAtTime(0.085, cStart + cDur * 0.6);
+      creakG.gain.exponentialRampToValueAtTime(0.0008, cStart + cDur);
+      var creakFilt = ctx.createBiquadFilter();
+      creakFilt.type = 'bandpass';
+      creakFilt.frequency.setValueAtTime(430, cStart);
+      creakFilt.frequency.linearRampToValueAtTime(720, cStart + cDur);
+      creakFilt.Q.value = 7;
+      creakFilt.connect(creakG); creakG.connect(master);
+      var creakOsc = ctx.createOscillator();
+      creakOsc.type = 'sawtooth';
+      creakOsc.frequency.setValueAtTime(205, cStart);
+      creakOsc.frequency.linearRampToValueAtTime(315, cStart + cDur);
+      creakOsc.connect(creakFilt);
+      var lfo = ctx.createOscillator();
+      lfo.type = 'sine'; lfo.frequency.value = 11.5;
+      var lfoGain = ctx.createGain(); lfoGain.gain.value = 9;
+      lfo.connect(lfoGain); lfoGain.connect(creakOsc.frequency);
+      creakOsc.start(cStart); creakOsc.stop(cStart + cDur + 0.05);
+      lfo.start(cStart);      lfo.stop(cStart + cDur + 0.05);
+    }
+    window.addEventListener('door-open-sound', playDoorSound);
+
+    window.addEventListener('load', function(){ try { start(); } catch(e){} });
+    window.addEventListener('click', start, { once: true });
+    window.addEventListener('keydown', start, { once: true });
+    window.addEventListener('touchstart', start, { once: true });
+  })();
+
+  // ═══ Generate rising ember particles for the cinematic intro ═══
+  (function(){
+    var field = document.getElementById('emberField');
+    if (!field) return;
+    for (var i = 0; i < 60; i++) {
+      var e = document.createElement('div');
+      e.className = 'ember';
+      e.style.left = (Math.random() * 100) + '%';
+      e.style.width = (1 + Math.random() * 2) + 'px';
+      e.style.height = e.style.width;
+      e.style.animationDuration = (6 + Math.random() * 7) + 's';
+      e.style.animationDelay = (-Math.random() * 8) + 's';
+      e.style.setProperty('--sway', ((Math.random() * 80) - 40) + 'px');
+      var shade = Math.random();
+      if (shade > 0.7) e.style.background = '#ffc078';
+      if (shade < 0.2) e.style.background = '#e89045';
+      field.appendChild(e);
+    }
+  })();
+
+  // ═══ Intro: two title cards, ~9s total, then release the flyover ═══
+  var intro = document.getElementById('mmdIntro');
+  window.__mmdIntroDone = false;
+  function endIntro(){
+    if (!intro) return;
+    intro.classList.add('gone');
+    window.__mmdIntroDone = true;
+  }
+  setTimeout(endIntro, 9000);
+
+  // ═══ Narrative captions during chess game ═══
+  // Timings are relative to the chess game start-event (fired ~1.8s after flyover ends)
+  var cap = document.getElementById('cap');
+  function showCaption(line, whisper, dur){
+    cap.innerHTML = line + (whisper ? '<span class="whisper">' + whisper + '</span>' : '');
+    cap.classList.add('show');
+    setTimeout(function(){ cap.classList.remove('show'); }, dur || 3500);
+  }
+
+  document.addEventListener('start-chess', function(){
+    // Opening beats — the three friends arrive
+    setTimeout(function(){
+      showCaption("A chamber of chess.", "three friends · one path forward", 3000);
+    }, 400);
+    setTimeout(function(){
+      showCaption("Take your places.", null, 2600);
+    }, 4000);
+    // The game awakens
+    setTimeout(function(){
+      showCaption("The pieces stir.", null, 2400);
+    }, 7000);
+    // First smash — the stakes become real
+    setTimeout(function(){
+      showCaption("This is no ordinary game.", null, 3200);
+    }, 12500);
+    // Ron reads the position
+    setTimeout(function(){
+      showCaption("He sees it before we do.", null, 2800);
+    }, 16000);
+    // Ron's decision
+    setTimeout(function(){
+      showCaption("Ron — there must be another way.", null, 3000);
+    }, 18800);
+    // Ron's resolve
+    setTimeout(function(){
+      showCaption("It has to be me.", "you have to go on, Harry", 3400);
+    }, 22000);
+    // Queen advances (the black queen starts sliding at delay 20500)
+    // The smash moment — caption hits RIGHT as the piece is destroyed
+    setTimeout(function(){
+      showCaption("— RON —", null, 2200);
+    }, 23300);
+    // Silence / aftermath
+    setTimeout(function(){
+      showCaption("Harry steps forward.", null, 2600);
+    }, 25700);
+    // Checkmate
+    setTimeout(function(){
+      showCaption("Checkmate.", null, 3200);
+    }, 27200);
+    // The path opens
+    setTimeout(function(){
+      showCaption("The way is open.", null, 2600);
+    }, 30800);
+
+    // ═══ SCENE CHANGE — transition to the stone chamber ═══
+    setTimeout(function(){
+      document.getElementById('blackout').classList.add('on');
+    }, 33800);
+    setTimeout(function(){
+      revealStoneChamber();
+    }, 35400);
+  });
+
+  // ═══ RON FALLS — dramatic sacrifice moment ═══
+  document.addEventListener('ron-falls', function(){
+    var ron = document.getElementById('char-ron');
+    if (!ron) return;
+    // Detach from the piece (so he doesn't get yanked to Y=-2 with the smashed piece)
+    var fp = ron.components['follow-piece'];
+    if (fp) fp.detach();
+    // Freeze Ron's current world position then animate a slow-motion fall
+    var curPos = ron.object3D.position.clone();
+    ron.setAttribute('animation__fall',
+      'property:rotation; to:-85 0 0; dur:1400; easing:easeInQuad');
+    ron.setAttribute('animation__arc',
+      'property:position; to:' + curPos.x + ' ' + 0.1 + ' ' + (curPos.z + 1.5) +
+      '; dur:1400; easing:easeInQuad');
+    // Fade out after he's on the ground
+    setTimeout(function(){
+      ron.setAttribute('animation__fade', 'property:components.material.material.opacity; to:0; dur:1400; delay:1200');
+      // Also scale him to nothing slowly so he disappears into the board
+      ron.setAttribute('animation__sink', 'property:scale; to:0.01 0.01 0.01; dur:1600; delay:1700; easing:easeInQuad');
+    }, 10);
+  });
+
+  // ═══ PORTAL DOORS — clicking a door opens the Sketchfab embed overlay ═══
+  var PORTAL_DESTINATIONS = {
+    'great-hall': {
+      title: 'The Great Hall',
+      src: 'https://sketchfab.com/models/bde62298ac8640588d5a2928b8e113dc/embed?autostart=1&ui_theme=dark&ui_infos=0&ui_watermark=0'
+    },
+    'dumbledores-office': {
+      title: "Dumbledore's Office",
+      src: 'https://sketchfab.com/models/76caff88cdad4773907b28a33345c501/embed?autostart=1&ui_theme=dark&ui_infos=0&ui_watermark=0'
+    }
+  };
+
+  document.addEventListener('open-portal', function(evt){
+    var dest = evt.detail && evt.detail.destination;
+    var info = PORTAL_DESTINATIONS[dest];
+    if (!info) return;
+    var overlay = document.getElementById('portal-overlay');
+    var iframe  = document.getElementById('portal-iframe');
+    var title   = document.getElementById('portal-title');
+    title.textContent = info.title;
+    iframe.src = info.src;
+    overlay.classList.add('open');
+  });
+
+  document.getElementById('portal-back').addEventListener('click', function(){
+    var overlay = document.getElementById('portal-overlay');
+    var iframe  = document.getElementById('portal-iframe');
+    overlay.classList.remove('open');
+    // Unload the iframe after the fade so music / models stop
+    setTimeout(function(){ iframe.src = 'about:blank'; }, 900);
+    // Let portal doors swing back closed
+    document.dispatchEvent(new CustomEvent('portal-closed'));
+  });
+
+  // ═══ KING DEFEATED — sword falls from the black king's hand ═══
+  document.addEventListener('king-defeated', function(){
+    var sword = document.getElementById('dk-sword');
+    if (!sword) return;
+    // Blade tips over backward, slides off the piece, clatters onto the board
+    var p = sword.object3D.position.clone();
+    sword.setAttribute('animation__tip',
+      'property:rotation; to:95 0 14; dur:850; easing:easeInQuad');
+    sword.setAttribute('animation__fall',
+      'property:position; to:' + (p.x + 0.2) + ' 0.15 ' + (p.z + 1.1) +
+      '; dur:850; easing:easeInQuad');
+    // The black king slumps forward a moment later
+    var dk = document.getElementById('dk');
+    if (dk) {
+      dk.setAttribute('animation__bow',
+        'property:rotation; to:25 0 0; dur:900; delay:500; easing:easeInOutQuad');
+    }
+  });
+
+  function revealStoneChamber(){
+    // Kill the outdoor scene visibility and swap in the stone chamber
+    var castle = document.querySelector('[gltf-model="#castle-glb"]');
+    var board  = document.querySelector('[wizard-chessboard]');
+    if (castle) castle.object3D.visible = false;
+    if (board)  board.object3D.visible  = false;
+    document.querySelectorAll('[id^="wp-"],[id^="bp-"],[id^="dr-"],[id^="lr-"],[id^="dk-"],[id^="lk-"],[id^="db-"],[id^="lb-"],#dq,#lq,#dk,#lk-king').forEach(function(e){
+      e.object3D.visible = false;
+    });
+    // hide starfield, night sky, and outdoor braziers/lights so they don't bleed into the chamber
+    var stars = document.querySelector('[starfield]'); if (stars) stars.object3D.visible = false;
+    var sky = document.querySelector('a-sky'); if (sky) sky.object3D.visible = false;
+    var chamber = document.getElementById('stoneChamber');
+    document.querySelectorAll('[brazier]').forEach(function(e){
+      if (chamber && !chamber.contains(e)) e.object3D.visible = false;
+    });
+    document.querySelectorAll('a-scene > a-light').forEach(function(l){ l.object3D.visible = false; });
+    // reveal the chamber
+    if (chamber) chamber.object3D.visible = true;
+    // move camera into chamber
+    var rig = document.getElementById('rig');
+    var camEl = rig.querySelector('a-camera');
+    rig.object3D.position.set(0, 1.6, -6);
+    // orient toward the mirror/stone at world origin
+    var m = new THREE.Matrix4();
+    m.lookAt(rig.object3D.position, new THREE.Vector3(0, 1.2, 0.5), new THREE.Vector3(0,1,0));
+    rig.object3D.quaternion.setFromRotationMatrix(m);
+
+    // fade blackout back out
+    setTimeout(function(){
+      document.getElementById('blackout').classList.remove('on');
+    }, 600);
+
+    // reveal stone title
+    setTimeout(function(){
+      var st = document.getElementById('stoneTitle');
+      st.innerHTML = "The Philosopher's Stone<span class=\"tagline\">a mirror, a secret, and the prize</span>";
+      st.classList.add('show');
+    }, 3200);
+    setTimeout(function(){
+      document.getElementById('stoneTitle').classList.remove('show');
+    }, 9500);
+
+    // kick off the stone chamber's own slow dolly
+    if (chamber && chamber.components['stone-reveal']){
+      chamber.components['stone-reveal'].trigger();
+    }
+    // Hand control back to the player once the dolly finishes so they can approach a door
+    setTimeout(function(){
+      var rig = document.getElementById('rig');
+      var cam = rig.querySelector('a-camera');
+      rig.setAttribute('wasd-controls', 'enabled', true);
+      cam.setAttribute('look-controls', 'enabled', true);
+      // Re-show HUD with updated hint
+      var hud = document.getElementById('hud');
+      hud.textContent = 'WASD to walk · approach a door';
+      hud.classList.remove('fade');
+      hud.style.opacity = '1';
+    }, 12000);
+  }
+
+  setTimeout(function(){document.getElementById('hud').classList.add('fade')},40000);
+
+  // ═══ SAFETY-NET TICK LOOP ═══
+  // Some A-Frame builds / resume-from-cache states leave the tick loop inactive.
+  // This watches for that and drives the same components manually via rAF.
+  (function(){
+    var watchdogStarted = false;
+    function ensureTicking(){
+      var scene = AFRAME.scenes && AFRAME.scenes[0];
+      if (!scene || !scene.hasLoaded) { setTimeout(ensureTicking, 300); return; }
+
+      // Compare flame scale over ~400ms. If it doesn't change, ticks aren't running.
+      var probe = document.querySelector('[brazier]');
+      if (!probe) { setTimeout(ensureTicking, 300); return; }
+      var flame = null;
+      probe.object3D.traverse(function(o){
+        if (o.isMesh && o.material && o.material.color && o.material.color.r > 0.9) flame = o;
+      });
+      if (!flame) { setTimeout(ensureTicking, 300); return; }
+      var before = flame.scale.y;
+      setTimeout(function(){
+        var after = flame.scale.y;
+        if (Math.abs(after - before) < 0.001) {
+          // Ticks not running — start manual driver
+          startManualDriver();
+        }
+      }, 500);
+    }
+
+    function startManualDriver(){
+      if (watchdogStarted) return;
+      watchdogStarted = true;
+      console.log('[mmd] Starting manual tick driver — A-Frame tick loop not advancing');
+      var rAF = window.requestAnimationFrame;
+      function loop(){
+        var t = performance.now();
+        var scene = AFRAME.scenes[0];
+        var b = scene && scene.behaviors;
+        if (b) {
+          // Collect all components with a tick method across every registered behavior bucket
+          Object.keys(b).forEach(function(name){
+            var bucket = b[name];
+            if (!bucket || !bucket.tick || !bucket.tick.array) return;
+            var arr = bucket.tick.array;
+            for (var i = 0; i < arr.length; i++) {
+              var c = arr[i];
+              if (c && typeof c.tick === 'function') {
+                try { c.tick(t, 16); } catch(e){}
+              }
+            }
+          });
+        }
+        rAF(loop);
+      }
+      rAF(loop);
+    }
+
+    ensureTicking();
+  })();
+</script>
+</body>
+</html>
