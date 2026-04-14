@@ -1370,7 +1370,7 @@
 
     /* ═══ NARRATIVE CAPTIONS during the chess game ═══ */
     .caption{
-      position:fixed;left:50%;bottom:14%;transform:translateX(-50%);
+      position:fixed;left:50%;bottom:24%;transform:translateX(-50%);
       z-index:200;color:#d6c59a;
       font-family:'Cormorant Garamond',Georgia,serif;
       font-size:1.15rem;letter-spacing:.18em;text-transform:uppercase;
@@ -1381,6 +1381,9 @@
       max-width:80vw;
     }
     .caption.show{opacity:1}
+    /* Hide the controls HUD whenever a narrative caption is showing so the two
+       never overlap at the bottom of the screen. */
+    body:has(.caption.show) #hud{opacity:0 !important;transition:opacity .5s ease}
     .caption .whisper{
       display:block;margin-top:.4em;font-size:.72rem;
       letter-spacing:.32em;opacity:.55;font-style:italic;
