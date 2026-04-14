@@ -1858,10 +1858,20 @@
     }
     window.addEventListener('door-open-sound', playDoorSound);
 
-    window.addEventListener('load', function(){ try { start(); } catch(e){} });
-    window.addEventListener('click', start, { once: true });
-    window.addEventListener('keydown', start, { once: true });
-    window.addEventListener('touchstart', start, { once: true });
+    // Bring sound up on the FIRST real user gesture. Chrome/Safari autoplay
+    // policy keeps any AudioContext suspended until a click/key/touch — so we
+    // wait for one before starting, and we ALSO resume the context every time
+    // (so a second gesture will recover from a suspended state).
+    function kick(){
+      try {
+        if (!started) start();
+        if (ctx && ctx.state === 'suspended') ctx.resume();
+      } catch(e){}
+    }
+    window.addEventListener('click',      kick);
+    window.addEventListener('keydown',    kick);
+    window.addEventListener('touchstart', kick, {passive:true});
+    window.addEventListener('pointerdown',kick);
   })();
 
   // ═══ Generate rising ember particles for the cinematic intro ═══
