@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <title>Wizard's Chess — Hogwarts</title>
   <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+  <script src="https://static.sketchfab.com/api/sketchfab-viewer-1.12.1.js"></script>
 
   <script>
     // ═══════════════════════════════════════════════════════════
@@ -103,6 +104,8 @@
         // doesn't fire repeatedly.
         this._btnState = { left: { primary:false, secondary:false },
                            right:{ primary:false, secondary:false } };
+        // Edge-triggered state for thumbstick horizontal D-pad flicks.
+        this._dpadState = { left:false, right:false };
       },
       tick: function(t, dt){
         var sceneEl = this.el.sceneEl;
@@ -141,6 +144,16 @@
           }
 
           if (src.handedness === 'left') {
+            // Edge-triggered D-pad flick — hard left / hard right past 0.7
+            // dispatches a 'vr-dpad' event. Only fires once per flick so
+            // holding the stick doesn't spam the annotation navigator.
+            var flickLeft  = ax < -0.7;
+            var flickRight = ax >  0.7;
+            if (flickLeft  && !this._dpadState.left)  document.dispatchEvent(new CustomEvent('vr-dpad', {detail:{direction:'left'}}));
+            if (flickRight && !this._dpadState.right) document.dispatchEvent(new CustomEvent('vr-dpad', {detail:{direction:'right'}}));
+            this._dpadState.left  = flickLeft;
+            this._dpadState.right = flickRight;
+
             if (Math.abs(ax) < dead && Math.abs(ay) < dead) continue;
             cam.object3D.getWorldQuaternion(this._camQ);
             this._fwd.set(0, 0, -1).applyQuaternion(this._camQ); this._fwd.y = 0; this._fwd.normalize();
@@ -1414,9 +1427,8 @@
       max-width:80vw;
     }
     .caption.show{opacity:1}
-    /* HUD fades out whenever the caption is active (driven by JS to toggle
-       the .hide-for-caption class — more reliable than CSS :has()). */
-    #hud.hide-for-caption{opacity:0 !important;transition:opacity .5s ease}
+    /* HUD stays visible the whole time in the bottom-left corner, so no
+       hide-for-caption rule is needed. */
     .caption .whisper{
       display:block;margin-top:.4em;font-size:.72rem;
       letter-spacing:.32em;opacity:.55;font-style:italic;
@@ -1481,31 +1493,28 @@
       flex:1;width:100%;height:100%;border:0;background:#000;
     }
 
+    /* Controls HUD — small, pinned to the bottom-left, always visible. */
     #hud{
-      position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:100;
-      font-family:Georgia,serif;color:rgba(200,210,220,.82);
-      background:rgba(0,0,0,.62);padding:10px 22px;border-radius:5px;
-      backdrop-filter:blur(8px);border:1px solid rgba(230,180,110,.18);
+      position:fixed;bottom:12px;left:12px;z-index:100;
+      font-family:Georgia,serif;color:rgba(200,210,220,.88);
+      background:rgba(0,0,0,.58);padding:7px 12px;border-radius:4px;
+      backdrop-filter:blur(8px);border:1px solid rgba(230,180,110,.16);
       opacity:0;transition:opacity 1.2s ease;
-      max-width:min(92vw, 820px);text-align:center;
-      box-shadow:0 4px 20px rgba(0,0,0,.45);
+      max-width:360px;text-align:left;
+      box-shadow:0 2px 12px rgba(0,0,0,.4);
     }
     #hud .hud-row{
-      display:flex;gap:22px;justify-content:center;flex-wrap:wrap;
-      font-size:.72rem;letter-spacing:.08em;line-height:1.5;
+      display:flex;flex-direction:column;gap:4px;
+      font-size:.58rem;letter-spacing:.05em;line-height:1.4;
     }
-    #hud .hud-block{display:flex;flex-direction:column;align-items:center;min-width:200px}
+    #hud .hud-block{display:flex;flex-direction:column;min-width:0}
     #hud .hud-label{
-      font-size:.58rem;letter-spacing:.22em;text-transform:uppercase;
-      color:rgba(230,180,110,.85);margin-bottom:4px;font-family:'Inter',sans-serif;font-weight:600;
+      font-size:.46rem;letter-spacing:.22em;text-transform:uppercase;
+      color:rgba(230,180,110,.85);margin-bottom:1px;font-family:'Inter',sans-serif;font-weight:600;
     }
-    #hud .hud-line{color:rgba(220,228,235,.88)}
+    #hud .hud-line{color:rgba(220,228,235,.86)}
     #hud .hud-line b{color:#ffd080;font-weight:600}
-    #hud .divider{width:1px;background:rgba(230,180,110,.2);margin:2px 0}
-    @media(max-width:640px){
-      #hud .hud-row{flex-direction:column;gap:10px}
-      #hud .divider{display:none}
-    }
+    #hud .divider{display:none}
     #hud.fade{opacity:0!important;pointer-events:none}
     #vig{position:fixed;inset:0;z-index:50;pointer-events:none;
       background:radial-gradient(ellipse at center,transparent 45%,rgba(0,0,10,.55) 100%)}
@@ -1545,13 +1554,14 @@
 <div id="hud">
   <div class="hud-row">
     <div class="hud-block">
-      <div class="hud-label">Laptop &middot; Mouse + Keyboard</div>
-      <div class="hud-line"><b>WASD</b> walk &middot; <b>Mouse</b> look &middot; <b>Q / E</b> up / down &middot; <b>Click door</b> to enter</div>
+      <div class="hud-label">Laptop</div>
+      <div class="hud-line"><b>WASD</b> walk &middot; <b>Mouse</b> look &middot; <b>T</b> tour trophies &middot; <b>Click</b> a door</div>
+      <div class="hud-line"><b>&larr; &rarr;</b> cycle waypoints inside a portal</div>
     </div>
-    <div class="divider"></div>
-    <div class="hud-block">
-      <div class="hud-label">VR Headset &middot; Quest Controllers</div>
-      <div class="hud-line"><b>Left stick</b> walk &middot; <b>Right stick</b> turn &middot; <b>A</b> or <b>point + trigger</b> to open a door</div>
+    <div class="hud-block" style="margin-top:4px">
+      <div class="hud-label">VR Headset</div>
+      <div class="hud-line"><b>L-stick</b> walk &middot; <b>R-stick</b> turn &middot; <b>A</b> door / trophy tour</div>
+      <div class="hud-line"><b>L-stick &larr; &rarr;</b> cycle waypoints in a portal</div>
     </div>
   </div>
 </div>
@@ -2044,13 +2054,7 @@
   function showCaption(line, whisper, dur){
     cap.innerHTML = line + (whisper ? '<span class="whisper">' + whisper + '</span>' : '');
     cap.classList.add('show');
-    // Hide the HUD while a narrative line is showing so they never overlap
-    var hudEl = document.getElementById('hud');
-    if (hudEl) hudEl.classList.add('hide-for-caption');
-    setTimeout(function(){
-      cap.classList.remove('show');
-      if (hudEl) hudEl.classList.remove('hide-for-caption');
-    }, dur || 3500);
+    setTimeout(function(){ cap.classList.remove('show'); }, dur || 3500);
   }
 
   document.addEventListener('start-chess', function(){
@@ -2130,17 +2134,64 @@
     }, 10);
   });
 
-  // ═══ PORTAL DOORS — clicking a door opens the Sketchfab embed overlay ═══
+  // ═══ PORTAL DOORS — open a Sketchfab destination with Viewer API ═══
+  // Using the Sketchfab Viewer API means we can navigate between annotations
+  // programmatically (prev / next), not just click them with a mouse.
   var PORTAL_DESTINATIONS = {
-    'great-hall': {
-      title: 'The Great Hall',
-      src: 'https://sketchfab.com/models/bde62298ac8640588d5a2928b8e113dc/embed?autostart=1&ui_theme=dark&ui_infos=0&ui_watermark=0'
-    },
-    'dumbledores-office': {
-      title: "Dumbledore's Office",
-      src: 'https://sketchfab.com/models/76caff88cdad4773907b28a33345c501/embed?autostart=1&ui_theme=dark&ui_infos=0&ui_watermark=0'
-    }
+    'great-hall':        { title: 'The Great Hall',        uid: 'bde62298ac8640588d5a2928b8e113dc' },
+    'dumbledores-office':{ title: "Dumbledore's Office",   uid: '76caff88cdad4773907b28a33345c501' }
   };
+
+  var sfApi = null;          // active Sketchfab Viewer API instance
+  var sfAnnotations = 0;     // number of annotations on the loaded model
+  var sfAnnotationIdx = -1;  // current annotation index (-1 = none)
+
+  function sfInit(iframeEl, uid){
+    // Close any existing client first
+    sfApi = null;
+    sfAnnotations = 0;
+    sfAnnotationIdx = -1;
+    try {
+      var client = new Sketchfab(iframeEl);
+      client.init(uid, {
+        success: function onSuccess(api){
+          api.start();
+          api.addEventListener('viewerready', function(){
+            sfApi = api;
+            api.getAnnotationList(function(err, list){
+              if (!err && list) sfAnnotations = list.length;
+            });
+          });
+          api.addEventListener('annotationSelect', function(idx){
+            sfAnnotationIdx = idx;
+          });
+        },
+        error: function onError(){ console.warn('Sketchfab init error'); },
+        ui_controls:   0,
+        ui_infos:      0,
+        ui_watermark:  0,
+        ui_inspector:  0,
+        ui_stop:       0,
+        ui_vr:         0,
+        ui_annotations:1,   // keep the numbered dots visible
+        ui_help:       0,
+        ui_settings:   0,
+        autostart:     1,
+        autospin:      0
+      });
+    } catch (e) { console.warn('Sketchfab client failed', e); }
+  }
+
+  function sfGoNextAnnotation(){
+    if (!sfApi || sfAnnotations === 0) return;
+    sfAnnotationIdx = (sfAnnotationIdx + 1) % sfAnnotations;
+    sfApi.gotoAnnotation(sfAnnotationIdx);
+  }
+  function sfGoPrevAnnotation(){
+    if (!sfApi || sfAnnotations === 0) return;
+    sfAnnotationIdx = (sfAnnotationIdx - 1 + sfAnnotations) % sfAnnotations;
+    sfApi.gotoAnnotation(sfAnnotationIdx);
+  }
 
   document.addEventListener('open-portal', function(evt){
     var dest = evt.detail && evt.detail.destination;
@@ -2150,31 +2201,82 @@
     var iframe  = document.getElementById('portal-iframe');
     var title   = document.getElementById('portal-title');
     title.textContent = info.title;
-    iframe.src = info.src;
+    // Reset the iframe so a fresh Sketchfab client can attach
+    iframe.src = 'about:blank';
     overlay.classList.add('open');
+    // Kick off the Viewer API on the next tick (iframe needs to be visible)
+    setTimeout(function(){ sfInit(iframe, info.uid); }, 120);
   });
 
   document.getElementById('portal-back').addEventListener('click', function(){
     var overlay = document.getElementById('portal-overlay');
     var iframe  = document.getElementById('portal-iframe');
     overlay.classList.remove('open');
-    // Unload the iframe after the fade so music / models stop
+    // Tear down the Viewer API and unload the iframe
+    sfApi = null; sfAnnotations = 0; sfAnnotationIdx = -1;
     setTimeout(function(){ iframe.src = 'about:blank'; }, 900);
-    // Let portal doors swing back closed
     document.dispatchEvent(new CustomEvent('portal-closed'));
   });
 
-  // ═══ VR A-BUTTON → activate the nearest portal door in range ═══
-  // In VR, walk up to a door and press the A button (right controller
-  // primary). If you're within 8 metres of any portal door, that door
-  // starts opening and fires its 'open-portal' event as usual.
+  // Keyboard: left / right arrow cycle annotations while the portal is open
+  window.addEventListener('keydown', function(e){
+    var overlay = document.getElementById('portal-overlay');
+    if (!overlay || !overlay.classList.contains('open')) return;
+    if (e.key === 'ArrowRight') { sfGoNextAnnotation(); e.preventDefault(); }
+    if (e.key === 'ArrowLeft')  { sfGoPrevAnnotation(); e.preventDefault(); }
+  });
+
+  // VR D-pad style cycling — fired by vr-thumbstick-move when the left
+  // thumbstick is tilted hard left/right (edge-triggered).
+  document.addEventListener('vr-dpad', function(evt){
+    var overlay = document.getElementById('portal-overlay');
+    if (!overlay || !overlay.classList.contains('open')) return;
+    if (evt.detail && evt.detail.direction === 'right') sfGoNextAnnotation();
+    if (evt.detail && evt.detail.direction === 'left')  sfGoPrevAnnotation();
+  });
+
+  // ═══ VR A-BUTTON — context-sensitive action ═══
+  // Priority 1: if near a portal door (<8 m), open it.
+  // Priority 2: if in the stone chamber, cycle through the four trophy
+  //             viewpoints (King → Queen → Bishop → Knight → King...).
+  var CHAMBER_VIEWS = [
+    { pos: [-8, 1.6, 13.5], look: [-8, 2.6, 16.5], label: 'The King'    },
+    { pos: [ 8, 1.6, 13.5], look: [ 8, 2.6, 16.5], label: 'The Queen'   },
+    { pos: [-5, 1.6,  9.5], look: [-5, 2.6, 12.5], label: 'The Bishop'  },
+    { pos: [ 5, 1.6,  9.5], look: [ 5, 2.6, 12.5], label: 'The Knight'  }
+  ];
+  var __currentView = -1;
+
+  function moveToChamberView(idx){
+    var v = CHAMBER_VIEWS[idx];
+    var rig = document.getElementById('rig');
+    if (!rig) return;
+    rig.object3D.position.set(v.pos[0], v.pos[1], v.pos[2]);
+    var m = new THREE.Matrix4();
+    m.lookAt(
+      new THREE.Vector3(v.pos[0],  v.pos[1],  v.pos[2]),
+      new THREE.Vector3(v.look[0], v.look[1], v.look[2]),
+      new THREE.Vector3(0, 1, 0)
+    );
+    rig.object3D.quaternion.setFromRotationMatrix(m);
+
+    // Show the trophy name briefly via the existing stoneTitle overlay
+    var st = document.getElementById('stoneTitle');
+    if (st) {
+      st.textContent = v.label;
+      st.classList.add('show');
+      setTimeout(function(){ st.classList.remove('show'); }, 2500);
+    }
+  }
+
   document.addEventListener('vr-action', function(){
     var rig = document.getElementById('rig');
     if (!rig) return;
     var rigPos = new THREE.Vector3();
     rig.object3D.getWorldPosition(rigPos);
-    var nearest = null;
-    var nearestD = Infinity;
+
+    // — Priority 1: open the nearest portal door in range —
+    var nearest = null, nearestD = Infinity;
     document.querySelectorAll('[portal-door]').forEach(function(el){
       if (!el.object3D.visible) return;
       var p = new THREE.Vector3();
@@ -2182,10 +2284,25 @@
       var d = p.distanceTo(rigPos);
       if (d < nearestD) { nearestD = d; nearest = el; }
     });
-    // Only activate if we're actually near one (8m threshold)
     if (nearest && nearestD < 8) {
       var comp = nearest.components['portal-door'];
       if (comp && comp._state === 'closed') comp._state = 'opening';
+      return;
+    }
+
+    // — Priority 2: cycle chamber trophy views —
+    var chamber = document.getElementById('stoneChamber');
+    if (chamber && chamber.object3D.visible) {
+      __currentView = (__currentView + 1) % CHAMBER_VIEWS.length;
+      moveToChamberView(__currentView);
+    }
+  });
+
+  // Desktop keyboard shortcut to fire the same A-button action.
+  // 'T' for 'tour' — doesn't collide with wasd-controls.
+  window.addEventListener('keydown', function(e){
+    if (e.key === 't' || e.key === 'T') {
+      document.dispatchEvent(new CustomEvent('vr-action', {detail:{hand:'keyboard'}}));
     }
   });
 
@@ -2269,7 +2386,14 @@
       cam.setAttribute('look-controls', 'enabled', true);
       // Re-show HUD with updated hint
       var hud = document.getElementById('hud');
-      hud.innerHTML = '<div class="hud-row"><div class="hud-block"><div class="hud-label">Laptop</div><div class="hud-line"><b>WASD</b> walk &middot; <b>Mouse</b> look &middot; <b>Click</b> door to enter</div></div><div class="divider"></div><div class="hud-block"><div class="hud-label">VR Headset</div><div class="hud-line"><b>Left stick</b> walk &middot; <b>Right stick</b> turn &middot; <b>A</b> on door to enter</div></div></div>';
+      hud.innerHTML = '<div class="hud-row">' +
+        '<div class="hud-block"><div class="hud-label">Laptop</div>' +
+        '<div class="hud-line"><b>WASD</b> walk &middot; <b>Mouse</b> look &middot; <b>T</b> tour trophies &middot; <b>Click</b> a door</div>' +
+        '<div class="hud-line"><b>&larr; &rarr;</b> cycle waypoints inside a portal</div></div>' +
+        '<div class="hud-block" style="margin-top:4px"><div class="hud-label">VR Headset</div>' +
+        '<div class="hud-line"><b>L-stick</b> walk &middot; <b>R-stick</b> turn &middot; <b>A</b> door / trophy tour</div>' +
+        '<div class="hud-line"><b>L-stick &larr; &rarr;</b> cycle waypoints in a portal</div></div>' +
+        '</div>';
       hud.classList.remove('fade');
       hud.style.opacity = '1';
     }, 12000);
