@@ -1686,86 +1686,83 @@
 </a-scene>
 
 <script>
-  // ═══ HEDWIG'S THEME — celesta arrangement of the Harry Potter main motif ═══
-  // Notes transcribed in E-minor, 3/8 time, quarter = 1 beat.
-  // [midi, startBeatFromPhraseStart, durationBeats]
+  // ═══ AMBIENT PAVILION SCORE — original atmospheric sound design ═══
+  // A slow cathedral-of-stone bed: sustained drones in natural-minor tonality,
+  // with a sparse bell voice that drops one note at random intervals.
+  // Everything is synthesized in-browser — nothing external, nothing sampled.
   (function(){
     var ctx = null, master = null, filter = null, started = false;
-    var BPM = 112;                       // 112 bpm — gentle, cinematic tempo
-    var beat = 60 / BPM;                 // seconds per quarter
-
-    // Iconic opening, then the answering phrase, then an echo repeat.
-    // Pitches: B4=71 D#5=75 E5=76 F5=77 F#5=78 G5=79 A5=81 B5=83 C6=84 D6=86 E6=88
-    var PHRASE = [
-      // --- Phrase 1 (the famous opening) ---
-      [71, 0.00, 0.50],                  // B4  pickup 8th
-      [76, 0.50, 1.50],                  // E5  dotted quarter
-      [79, 2.00, 0.50],                  // G5  8th
-      [78, 2.50, 1.00],                  // F#5 quarter
-      [76, 3.50, 1.00],                  // E5  quarter
-      [83, 4.50, 1.00],                  // B5  quarter  (the leap up)
-      [81, 5.50, 1.50],                  // A5  dotted quarter
-      [78, 7.00, 3.00],                  // F#5 dotted half (hold)
-      // --- Phrase 2 (descending answer) ---
-      [76,10.00, 0.50],                  // E5
-      [79,10.50, 0.50],                  // G5
-      [78,11.00, 0.50],                  // F#5
-      [75,11.50, 1.00],                  // D#5 quarter
-      [77,12.50, 0.50],                  // F5
-      [71,13.00, 2.00],                  // B4  half (hold)
-      // --- Phrase 3 (answer ascending — the "aha" resolution) ---
-      [71,15.00, 0.50],                  // B4  pickup
-      [76,15.50, 1.50],                  // E5
-      [79,17.00, 0.50],                  // G5
-      [78,17.50, 1.00],                  // F#5
-      [76,18.50, 1.00],                  // E5
-      [86,19.50, 1.00],                  // D6  big leap
-      [84,20.50, 1.50],                  // C6
-      [83,22.00, 3.00],                  // B5  dotted half resolve
-      // --- small tag descending back to the start ---
-      [81,25.00, 0.50],
-      [79,25.50, 0.50],
-      [78,26.00, 1.00],
-      [76,27.00, 2.50]
-    ];
-    var PHRASE_BEATS = 30;               // total length so loop spaces cleanly
 
     function midi2hz(m){ return 440 * Math.pow(2, (m - 69) / 12); }
 
-    // Celesta-ish bell voice: sine fundamental + sine 2x octave + weak 3x; exp decay.
-    function playNote(time, midi, dur){
+    // Long-evolving sustained drone voice — sine partials stacked, slow tremolo.
+    function startDrone(midi, level){
       var f = midi2hz(midi);
-      var g = ctx.createGain();
-      g.gain.setValueAtTime(0, time);
-      g.gain.linearRampToValueAtTime(0.22, time + 0.008);
-      g.gain.exponentialRampToValueAtTime(0.0006, time + Math.min(2.8, dur * 1.4));
+      var droneG = ctx.createGain();
+      droneG.gain.setValueAtTime(0.0001, ctx.currentTime);
+      droneG.gain.linearRampToValueAtTime(level, ctx.currentTime + 6);
+      droneG.connect(filter);
 
-      function osc(type, freq, level){
+      // Stacked partials — gives the drone a warm organ-ish body
+      [1.0, 2.0, 3.0, 4.01].forEach(function(mult, i){
         var o = ctx.createOscillator();
-        o.type = type;
-        o.frequency.value = freq;
-        var lg = ctx.createGain(); lg.gain.value = level;
-        o.connect(lg); lg.connect(g);
-        o.start(time); o.stop(time + Math.min(3.2, dur * 1.6));
-        return o;
-      }
+        o.type = i === 0 ? 'sine' : (i === 3 ? 'triangle' : 'sine');
+        // Tiny detune per partial to keep the tone alive
+        o.frequency.value = f * mult * (1 + (Math.random() - 0.5) * 0.0018);
+        var og = ctx.createGain();
+        og.gain.value = [0.55, 0.18, 0.08, 0.04][i];
+        o.connect(og); og.connect(droneG);
+        o.start();
+      });
 
-      osc('sine',     f,      0.55);     // fundamental
-      osc('sine',     f * 2,  0.28);     // 1st octave shimmer
-      osc('triangle', f * 3,  0.10);     // slight metallic bite
-      osc('sine',     f * 0.5,0.18);     // sub warmth
+      // Slow tremolo LFO on the drone level
+      var lfo = ctx.createOscillator();
+      lfo.type = 'sine'; lfo.frequency.value = 0.07 + Math.random() * 0.05;
+      var lfoDepth = ctx.createGain();
+      lfoDepth.gain.value = level * 0.18;
+      lfo.connect(lfoDepth); lfoDepth.connect(droneG.gain);
+      lfo.start();
 
-      g.connect(filter);
+      return droneG;
     }
 
-    function scheduleLoop(offset){
-      var t0 = ctx.currentTime + offset;
-      for (var i = 0; i < PHRASE.length; i++){
-        var n = PHRASE[i];
-        playNote(t0 + n[1] * beat, n[0], n[2] * beat);
+    // Sparse bell voice — single note that blooms and decays
+    function playBell(midi, atTime, dur){
+      var f = midi2hz(midi);
+      var g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, atTime);
+      g.gain.exponentialRampToValueAtTime(0.18, atTime + 0.05);
+      g.gain.exponentialRampToValueAtTime(0.0005, atTime + dur);
+      g.connect(filter);
+
+      // Bell harmonics
+      [[1.0, 'sine', 0.50],
+       [2.0, 'sine', 0.22],
+       [3.01, 'triangle', 0.08],
+       [0.5, 'sine', 0.14]
+      ].forEach(function(p){
+        var o = ctx.createOscillator();
+        o.type = p[1];
+        o.frequency.value = f * p[0];
+        var og = ctx.createGain(); og.gain.value = p[2];
+        o.connect(og); og.connect(g);
+        o.start(atTime); o.stop(atTime + dur + 0.2);
+      });
+    }
+
+    // Schedule the sparse bell layer — one note every 6–14 seconds, drawn
+    // from a natural-minor scale so nothing ever clashes with the drones.
+    var SCALE = [64, 67, 69, 71, 72, 74, 76, 79, 81, 83]; // E-natural-minor-ish pool
+    function scheduleBells(){
+      var t = ctx.currentTime + 4;
+      for (var i = 0; i < 40; i++) {
+        var midi = SCALE[Math.floor(Math.random() * SCALE.length)];
+        var dur = 2.5 + Math.random() * 2.5;
+        playBell(midi, t, dur);
+        t += 6 + Math.random() * 8;
       }
-      var total = (PHRASE_BEATS + 2) * beat; // add breathing space between loops
-      setTimeout(function(){ if (started) scheduleLoop(0); }, total * 1000);
+      // Queue the next batch before this one runs out
+      setTimeout(function(){ if (started) scheduleBells(); }, (t - ctx.currentTime - 10) * 1000);
     }
 
     function start(){
@@ -1773,27 +1770,33 @@
       started = true;
       ctx = new (window.AudioContext || window.webkitAudioContext)();
       master = ctx.createGain();
-      master.gain.value = 0.38;
+      master.gain.value = 0.45;
 
-      // warm low-pass for the bell voice
+      // Gentle low-pass shapes the whole bed
       filter = ctx.createBiquadFilter();
       filter.type = 'lowpass';
-      filter.frequency.value = 4200;
-      filter.Q.value = 0.5;
+      filter.frequency.value = 3600;
+      filter.Q.value = 0.6;
       filter.connect(master);
 
-      // stereo-ish reverb via two feedback delays
-      var d1 = ctx.createDelay(1.5); d1.delayTime.value = 0.19;
-      var d2 = ctx.createDelay(1.5); d2.delayTime.value = 0.33;
-      var dg1 = ctx.createGain(); dg1.gain.value = 0.30;
-      var dg2 = ctx.createGain(); dg2.gain.value = 0.22;
+      // Stereo-ish reverb via two feedback delays
+      var d1 = ctx.createDelay(2.0); d1.delayTime.value = 0.28;
+      var d2 = ctx.createDelay(2.0); d2.delayTime.value = 0.45;
+      var dg1 = ctx.createGain(); dg1.gain.value = 0.38;
+      var dg2 = ctx.createGain(); dg2.gain.value = 0.26;
       master.connect(ctx.destination);
       master.connect(d1); d1.connect(dg1); dg1.connect(ctx.destination); dg1.connect(d2);
       d2.connect(dg2); dg2.connect(ctx.destination);
 
-      // try to resume (Safari/Chrome autoplay policy may require a gesture)
       if (ctx.state === 'suspended') ctx.resume();
-      scheduleLoop(0.4);
+
+      // Three stacked drones — root, fifth, octave — form the harmonic bed
+      startDrone(52, 0.20);   // E3 root
+      startDrone(59, 0.14);   // B3 fifth
+      startDrone(64, 0.10);   // E4 octave
+
+      // Sparse bell layer
+      scheduleBells();
     }
 
     // ─── Door-open SFX: low wooden thud + squealing hinge creak ───
