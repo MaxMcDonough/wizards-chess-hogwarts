@@ -99,6 +99,10 @@
         this._right = new THREE.Vector3();
         this._up    = new THREE.Vector3(0, 1, 0);
         this._camQ  = new THREE.Quaternion();
+        // Edge-triggered state for B / Y buttons on each hand so a hold
+        // doesn't fire repeatedly.
+        this._btnState = { left: { primary:false, secondary:false },
+                           right:{ primary:false, secondary:false } };
       },
       tick: function(t, dt){
         var sceneEl = this.el.sceneEl;
@@ -117,10 +121,24 @@
           var src = session.inputSources[i];
           if (!src.gamepad || !src.gamepad.axes) continue;
           var axes = src.gamepad.axes;
+          var buttons = src.gamepad.buttons || [];
           // Most WebXR controllers expose the main thumbstick on axes[2]/axes[3].
           // axes[0]/axes[1] are reserved for the trackpad (legacy) on some devices.
           var ax = axes.length >= 4 ? axes[2] : (axes[0] || 0);
           var ay = axes.length >= 4 ? axes[3] : (axes[1] || 0);
+
+          if (src.handedness === 'left' || src.handedness === 'right') {
+            // Edge-triggered button presses.
+            // Quest standard mapping: buttons[4] = A/X (primary),
+            //                        buttons[5] = B/Y (secondary).
+            var prim = buttons[4] && buttons[4].pressed;
+            var sec  = buttons[5] && buttons[5].pressed;
+            var state = this._btnState[src.handedness];
+            if (prim && !state.primary)   this._fireButton(src.handedness, 'primary');
+            if (sec  && !state.secondary) this._fireButton(src.handedness, 'secondary');
+            state.primary   = prim;
+            state.secondary = sec;
+          }
 
           if (src.handedness === 'left') {
             if (Math.abs(ax) < dead && Math.abs(ay) < dead) continue;
@@ -135,6 +153,19 @@
             var rad = this.data.turnSpeed * Math.PI / 180 * dts;
             rig.object3D.rotation.y -= ax * rad;
           }
+        }
+      },
+
+      // Dispatch a semantic VR button event that other code can listen for.
+      // Mapping:
+      //   right / secondary  =  B button  →  "vr-back"   (close portal / return to chamber)
+      //   left  / secondary  =  Y button  →  "vr-back"   (mirror of B for left-handed)
+      //   *     / primary    =  A or X    →  "vr-action" (reserved; unused for now)
+      _fireButton: function(hand, kind){
+        if (kind === 'secondary') {
+          document.dispatchEvent(new CustomEvent('vr-back', {detail:{hand:hand}}));
+        } else {
+          document.dispatchEvent(new CustomEvent('vr-action', {detail:{hand:hand}}));
         }
       }
     });
@@ -1520,7 +1551,7 @@
     <div class="divider"></div>
     <div class="hud-block">
       <div class="hud-label">VR Headset &middot; Quest Controllers</div>
-      <div class="hud-line"><b>Left stick</b> walk &middot; <b>Right stick</b> turn &middot; <b>Point + trigger</b> on a door to enter</div>
+      <div class="hud-line"><b>Left stick</b> walk &middot; <b>Right stick</b> turn &middot; <b>A</b> or <b>point + trigger</b> to open a door</div>
     </div>
   </div>
 </div>
@@ -2133,6 +2164,31 @@
     document.dispatchEvent(new CustomEvent('portal-closed'));
   });
 
+  // ═══ VR A-BUTTON → activate the nearest portal door in range ═══
+  // In VR, walk up to a door and press the A button (right controller
+  // primary). If you're within 8 metres of any portal door, that door
+  // starts opening and fires its 'open-portal' event as usual.
+  document.addEventListener('vr-action', function(){
+    var rig = document.getElementById('rig');
+    if (!rig) return;
+    var rigPos = new THREE.Vector3();
+    rig.object3D.getWorldPosition(rigPos);
+    var nearest = null;
+    var nearestD = Infinity;
+    document.querySelectorAll('[portal-door]').forEach(function(el){
+      if (!el.object3D.visible) return;
+      var p = new THREE.Vector3();
+      el.object3D.getWorldPosition(p);
+      var d = p.distanceTo(rigPos);
+      if (d < nearestD) { nearestD = d; nearest = el; }
+    });
+    // Only activate if we're actually near one (8m threshold)
+    if (nearest && nearestD < 8) {
+      var comp = nearest.components['portal-door'];
+      if (comp && comp._state === 'closed') comp._state = 'opening';
+    }
+  });
+
   // ═══ KING DEFEATED — sword falls from the black king's hand ═══
   document.addEventListener('king-defeated', function(){
     var sword = document.getElementById('dk-sword');
@@ -2213,7 +2269,7 @@
       cam.setAttribute('look-controls', 'enabled', true);
       // Re-show HUD with updated hint
       var hud = document.getElementById('hud');
-      hud.innerHTML = '<div class="hud-row"><div class="hud-block"><div class="hud-label">Laptop</div><div class="hud-line"><b>WASD</b> walk &middot; <b>Mouse</b> look &middot; <b>Click</b> door to enter</div></div><div class="divider"></div><div class="hud-block"><div class="hud-label">VR Headset</div><div class="hud-line"><b>Left stick</b> walk &middot; <b>Right stick</b> turn &middot; <b>Trigger</b> on door to enter</div></div></div>';
+      hud.innerHTML = '<div class="hud-row"><div class="hud-block"><div class="hud-label">Laptop</div><div class="hud-line"><b>WASD</b> walk &middot; <b>Mouse</b> look &middot; <b>Click</b> door to enter</div></div><div class="divider"></div><div class="hud-block"><div class="hud-label">VR Headset</div><div class="hud-line"><b>Left stick</b> walk &middot; <b>Right stick</b> turn &middot; <b>A</b> on door to enter</div></div></div>';
       hud.classList.remove('fade');
       hud.style.opacity = '1';
     }, 12000);
