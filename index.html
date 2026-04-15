@@ -16,21 +16,24 @@
     // movement AND desktop wasd-controls become responsive.
     window.__chamberReady = false;
 
-    // Show / hide the 3D in-scene HUD based on VR mode. On desktop the
-    // HTML #hud in the bottom-left is the control reference; the 3D one
-    // would just be an intrusive floating banner.
-    window.addEventListener('load', function(){
-      var scene = document.querySelector('a-scene');
-      if (!scene) return;
-      scene.addEventListener('enter-vr', function(){
-        var el = document.getElementById('vrHud');
-        if (el) el.setAttribute('visible', true);
-      });
-      scene.addEventListener('exit-vr', function(){
-        var el = document.getElementById('vrHud');
-        if (el) el.setAttribute('visible', false);
-      });
+    /* ════════════════════════════════════════════
+       VR-ONLY VISIBILITY
+       Syncs an entity's visibility to the scene's VR mode every tick
+       so it's guaranteed to be off on desktop and on in headset — no
+       matter what order events fire in.
+       ════════════════════════════════════════════ */
+    AFRAME.registerComponent('vr-only', {
+      tick: function(){
+        var scene = this.el.sceneEl;
+        var inVR  = !!(scene && scene.is && scene.is('vr-mode'));
+        if (inVR !== this._was) {
+          this.el.setAttribute('visible', inVR);
+          this._was = inVR;
+        }
+      },
+      init: function(){ this._was = null; this.el.setAttribute('visible', false); }
     });
+
 
     // ═══════════════════════════════════════════════════════════
     //  COMPONENTS
@@ -1298,13 +1301,6 @@
         if (p >= 1) {
           this._active = false;
           window.__chamberReady = true;
-          // Update the in-scene VR HUD to the full controls list now that
-          // the player can move.
-          var vrText = document.getElementById('vrHudText');
-          if (vrText) {
-            vrText.setAttribute('value',
-              'L-stick walk  •  R-stick turn  •  A open door / tour trophies  •  L-stick L/R cycle waypoints');
-          }
         }
       }
     });
@@ -1820,26 +1816,6 @@
     <a-entity portal-door="label:DUMBLEDORE'S OFFICE; destination:dumbledores-office; accent:#8ecbff"
               position=" 18 0 6" rotation="0 -90 0"></a-entity>
 
-    <!-- 3D chamber title — visible in VR. Floats above the ruby stone. -->
-    <a-entity id="chamberTitle3D" position="0 8.2 17.8" visible="false">
-      <a-text value="The Philosopher's Stone"
-              align="center" color="#e7d7a7" width="14"
-              position="0 0.7 0" anchor="center"></a-text>
-      <a-text value="a mirror, a secret, and the prize"
-              align="center" color="#c9a871" width="8"
-              position="0 0 0" anchor="center"></a-text>
-    </a-entity>
-
-    <!-- 3D trophy nameplates — one per piece. Shown as small labels floating
-         just under each piece so VR users can read what they're looking at. -->
-    <a-text id="trophyLabelKing"   value="THE KING"   align="center" color="#e7d7a7" width="4"
-            position="-8 1.85 16.5" anchor="center" rotation="0 0 0"></a-text>
-    <a-text id="trophyLabelQueen"  value="THE QUEEN"  align="center" color="#e7d7a7" width="4"
-            position=" 8 1.85 16.5" anchor="center" rotation="0 0 0"></a-text>
-    <a-text id="trophyLabelBishop" value="THE BISHOP" align="center" color="#e7d7a7" width="4"
-            position="-5 1.85 12.5" anchor="center" rotation="0 0 0"></a-text>
-    <a-text id="trophyLabelKnight" value="THE KNIGHT" align="center" color="#e7d7a7" width="4"
-            position=" 5 1.85 12.5" anchor="center" rotation="0 0 0"></a-text>
   </a-entity>
 
   <!-- Night sky gradient -->
@@ -1880,21 +1856,24 @@
         geometry="primitive: ring; radiusInner: 0.008; radiusOuter: 0.012"
         position="0 0 -1"></a-cursor>
 
-      <!-- 3D HUD — controls panel parented to the camera for VR ONLY.
-           Hidden by default and on desktop; the scene's enter-vr / exit-vr
-           events toggle visibility. Desktop gets the HTML #hud instead. -->
-      <a-entity id="vrHud"
-        position="-0.28 -0.26 -0.7"
-        rotation="-10 18 0"
-        visible="false">
-        <a-plane width="0.42" height="0.14"
-          material="color:#000; opacity:0.72; transparent:true; shader:flat"
-          position="0 0 0"></a-plane>
-        <a-text id="vrHudText"
-          value="L-stick walk  R-stick turn  A open door"
-          align="center" color="#ffd680" width="0.78"
-          position="0 0 0.005"
-          wrap-count="26"></a-text>
+      <!-- VR-only head-locked HUD. Child of the camera so it stays pinned
+           to the bottom-left of the FOV as the headset turns. Hidden on
+           desktop by the vr-only component; desktop uses the HTML #hud. -->
+      <a-entity id="vrHud" vr-only
+        position="-0.26 -0.18 -0.6"
+        rotation="0 0 0">
+        <a-plane width="0.22" height="0.07"
+          material="color:#000; opacity:0.68; transparent:true; shader:flat"></a-plane>
+        <a-text id="vrHudLine1"
+          value="L-stick walk   R-stick turn"
+          align="center" color="#ffd680" width="0.40"
+          position="0 0.012 0.001"
+          wrap-count="34"></a-text>
+        <a-text id="vrHudLine2"
+          value="A open door"
+          align="center" color="#d9cfba" width="0.40"
+          position="0 -0.014 0.001"
+          wrap-count="34"></a-text>
       </a-entity>
     </a-camera>
 
