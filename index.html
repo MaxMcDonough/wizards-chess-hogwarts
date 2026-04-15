@@ -16,6 +16,22 @@
     // movement AND desktop wasd-controls become responsive.
     window.__chamberReady = false;
 
+    // Show / hide the 3D in-scene HUD based on VR mode. On desktop the
+    // HTML #hud in the bottom-left is the control reference; the 3D one
+    // would just be an intrusive floating banner.
+    window.addEventListener('load', function(){
+      var scene = document.querySelector('a-scene');
+      if (!scene) return;
+      scene.addEventListener('enter-vr', function(){
+        var el = document.getElementById('vrHud');
+        if (el) el.setAttribute('visible', true);
+      });
+      scene.addEventListener('exit-vr', function(){
+        var el = document.getElementById('vrHud');
+        if (el) el.setAttribute('visible', false);
+      });
+    });
+
     // ═══════════════════════════════════════════════════════════
     //  COMPONENTS
     // ═══════════════════════════════════════════════════════════
@@ -1803,6 +1819,27 @@
               position="-18 0 6" rotation="0 90 0"></a-entity>
     <a-entity portal-door="label:DUMBLEDORE'S OFFICE; destination:dumbledores-office; accent:#8ecbff"
               position=" 18 0 6" rotation="0 -90 0"></a-entity>
+
+    <!-- 3D chamber title — visible in VR. Floats above the ruby stone. -->
+    <a-entity id="chamberTitle3D" position="0 8.2 17.8" visible="false">
+      <a-text value="The Philosopher's Stone"
+              align="center" color="#e7d7a7" width="14"
+              position="0 0.7 0" anchor="center"></a-text>
+      <a-text value="a mirror, a secret, and the prize"
+              align="center" color="#c9a871" width="8"
+              position="0 0 0" anchor="center"></a-text>
+    </a-entity>
+
+    <!-- 3D trophy nameplates — one per piece. Shown as small labels floating
+         just under each piece so VR users can read what they're looking at. -->
+    <a-text id="trophyLabelKing"   value="THE KING"   align="center" color="#e7d7a7" width="4"
+            position="-8 1.85 16.5" anchor="center" rotation="0 0 0"></a-text>
+    <a-text id="trophyLabelQueen"  value="THE QUEEN"  align="center" color="#e7d7a7" width="4"
+            position=" 8 1.85 16.5" anchor="center" rotation="0 0 0"></a-text>
+    <a-text id="trophyLabelBishop" value="THE BISHOP" align="center" color="#e7d7a7" width="4"
+            position="-5 1.85 12.5" anchor="center" rotation="0 0 0"></a-text>
+    <a-text id="trophyLabelKnight" value="THE KNIGHT" align="center" color="#e7d7a7" width="4"
+            position=" 5 1.85 12.5" anchor="center" rotation="0 0 0"></a-text>
   </a-entity>
 
   <!-- Night sky gradient -->
@@ -1843,25 +1880,21 @@
         geometry="primitive: ring; radiusInner: 0.008; radiusOuter: 0.012"
         position="0 0 -1"></a-cursor>
 
-      <!-- 3D HUD — a small instructions panel parented to the camera so it
-           always sits just below the centre of the view. Visible in both
-           VR and desktop (unless desktop prefers the bottom-left HTML HUD,
-           in which case we can hide it on scenes.is('vr-mode') check).
-           Positioned at -0.42 y, -0.9 z → bottom of the FOV, close enough
-           to read but not blocking the scene. -->
+      <!-- 3D HUD — controls panel parented to the camera for VR ONLY.
+           Hidden by default and on desktop; the scene's enter-vr / exit-vr
+           events toggle visibility. Desktop gets the HTML #hud instead. -->
       <a-entity id="vrHud"
-        position="0 -0.42 -0.9"
-        rotation="-24 0 0"
-        visible="true">
-        <a-plane width="0.82" height="0.22"
-          material="color:#000; opacity:0.62; transparent:true; shader:flat"
+        position="-0.28 -0.26 -0.7"
+        rotation="-10 18 0"
+        visible="false">
+        <a-plane width="0.42" height="0.14"
+          material="color:#000; opacity:0.72; transparent:true; shader:flat"
           position="0 0 0"></a-plane>
         <a-text id="vrHudText"
-          value="Watch the match — controls unlock in the chamber"
-          align="center" color="#ffd680" width="1.5"
-          position="0 0 0.01"
-          wrap-count="44"
-          font="https://cdn.aframe.io/fonts/Exo2Bold.fnt"></a-text>
+          value="L-stick walk  R-stick turn  A open door"
+          align="center" color="#ffd680" width="0.78"
+          position="0 0 0.005"
+          wrap-count="26"></a-text>
       </a-entity>
     </a-camera>
 
@@ -2181,23 +2214,29 @@
     }, 10);
   });
 
-  // ═══ PORTAL DOORS — open a Sketchfab destination with Viewer API ═══
-  // Using the Sketchfab Viewer API means we can navigate between annotations
-  // programmatically (prev / next), not just click them with a mouse.
+  // ═══ PORTAL DOORS — open a Sketchfab destination ═══
+  // We load the embed URL directly (always works). If the Sketchfab Viewer
+  // API script is available, we ALSO try to attach it so we can programmatically
+  // cycle annotations. If the API attach fails for any reason, the raw embed
+  // iframe still works perfectly — the user just can't use the left/right
+  // arrow cycling, but the portal is never broken.
   var PORTAL_DESTINATIONS = {
     'great-hall':        { title: 'The Great Hall',        uid: 'bde62298ac8640588d5a2928b8e113dc' },
     'dumbledores-office':{ title: "Dumbledore's Office",   uid: '76caff88cdad4773907b28a33345c501' }
   };
+  function embedUrl(uid){
+    // autostart=1 loads + plays the model; dark UI with minimal chrome
+    return 'https://sketchfab.com/models/' + uid + '/embed' +
+      '?autostart=1&ui_theme=dark&ui_infos=0&ui_watermark=0&ui_stop=0';
+  }
 
-  var sfApi = null;          // active Sketchfab Viewer API instance
-  var sfAnnotations = 0;     // number of annotations on the loaded model
-  var sfAnnotationIdx = -1;  // current annotation index (-1 = none)
+  var sfApi = null;          // active Sketchfab Viewer API instance (if attached)
+  var sfAnnotations = 0;
+  var sfAnnotationIdx = -1;
 
-  function sfInit(iframeEl, uid){
-    // Close any existing client first
-    sfApi = null;
-    sfAnnotations = 0;
-    sfAnnotationIdx = -1;
+  function sfTryApiAttach(iframeEl, uid){
+    // Only try if the Viewer API script actually loaded
+    if (typeof Sketchfab === 'undefined') return;
     try {
       var client = new Sketchfab(iframeEl);
       client.init(uid, {
@@ -2213,20 +2252,12 @@
             sfAnnotationIdx = idx;
           });
         },
-        error: function onError(){ console.warn('Sketchfab init error'); },
-        ui_controls:   0,
-        ui_infos:      0,
-        ui_watermark:  0,
-        ui_inspector:  0,
-        ui_stop:       0,
-        ui_vr:         0,
-        ui_annotations:1,   // keep the numbered dots visible
-        ui_help:       0,
-        ui_settings:   0,
-        autostart:     1,
-        autospin:      0
+        error: function(){ /* silent — raw embed still plays */ },
+        ui_controls:1, ui_infos:0, ui_watermark:0, ui_inspector:0,
+        ui_stop:0, ui_vr:0, ui_annotations:1, ui_help:0, ui_settings:0,
+        autostart:1, autospin:0
       });
-    } catch (e) { console.warn('Sketchfab client failed', e); }
+    } catch (e) { /* silent */ }
   }
 
   function sfGoNextAnnotation(){
@@ -2248,18 +2279,21 @@
     var iframe  = document.getElementById('portal-iframe');
     var title   = document.getElementById('portal-title');
     title.textContent = info.title;
-    // Reset the iframe so a fresh Sketchfab client can attach
-    iframe.src = 'about:blank';
+    // Always set the raw embed URL so the portal ALWAYS opens to something,
+    // even if the Sketchfab Viewer API fails or its script didn't load.
+    iframe.src = embedUrl(info.uid);
     overlay.classList.add('open');
-    // Kick off the Viewer API on the next tick (iframe needs to be visible)
-    setTimeout(function(){ sfInit(iframe, info.uid); }, 120);
+    // Best-effort: also attach the Viewer API so we can cycle annotations.
+    // If it fails, no problem — the raw embed above keeps playing.
+    // (Give the iframe a moment to attach, then the API will hijack it.)
+    sfApi = null; sfAnnotations = 0; sfAnnotationIdx = -1;
+    setTimeout(function(){ sfTryApiAttach(iframe, info.uid); }, 300);
   });
 
   document.getElementById('portal-back').addEventListener('click', function(){
     var overlay = document.getElementById('portal-overlay');
     var iframe  = document.getElementById('portal-iframe');
     overlay.classList.remove('open');
-    // Tear down the Viewer API and unload the iframe
     sfApi = null; sfAnnotations = 0; sfAnnotationIdx = -1;
     setTimeout(function(){ iframe.src = 'about:blank'; }, 900);
     document.dispatchEvent(new CustomEvent('portal-closed'));
@@ -2411,14 +2445,22 @@
       document.getElementById('blackout').classList.remove('on');
     }, 600);
 
-    // reveal stone title
+    // reveal stone title (HTML overlay for desktop)
     setTimeout(function(){
       var st = document.getElementById('stoneTitle');
       st.innerHTML = "The Philosopher's Stone<span class=\"tagline\">a mirror, a secret, and the prize</span>";
       st.classList.add('show');
+      // Only show the 3D world title in VR (desktop already has the HTML title)
+      var sceneEl = document.querySelector('a-scene');
+      if (sceneEl && sceneEl.is && sceneEl.is('vr-mode')) {
+        var t3d = document.getElementById('chamberTitle3D');
+        if (t3d) t3d.setAttribute('visible', true);
+      }
     }, 3200);
     setTimeout(function(){
       document.getElementById('stoneTitle').classList.remove('show');
+      var t3d = document.getElementById('chamberTitle3D');
+      if (t3d) t3d.setAttribute('visible', false);
     }, 9500);
 
     // kick off the stone chamber's own slow dolly
