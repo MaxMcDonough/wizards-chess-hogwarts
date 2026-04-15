@@ -16,23 +16,6 @@
     // movement AND desktop wasd-controls become responsive.
     window.__chamberReady = false;
 
-    /* ════════════════════════════════════════════
-       VR-ONLY VISIBILITY
-       Syncs an entity's visibility to the scene's VR mode every tick
-       so it's guaranteed to be off on desktop and on in headset — no
-       matter what order events fire in.
-       ════════════════════════════════════════════ */
-    AFRAME.registerComponent('vr-only', {
-      tick: function(){
-        var scene = this.el.sceneEl;
-        var inVR  = !!(scene && scene.is && scene.is('vr-mode'));
-        if (inVR !== this._was) {
-          this.el.setAttribute('visible', inVR);
-          this._was = inVR;
-        }
-      },
-      init: function(){ this._was = null; this.el.setAttribute('visible', false); }
-    });
 
 
     // ═══════════════════════════════════════════════════════════
@@ -1856,25 +1839,6 @@
         geometry="primitive: ring; radiusInner: 0.008; radiusOuter: 0.012"
         position="0 0 -1"></a-cursor>
 
-      <!-- VR-only head-locked HUD. Child of the camera so it stays pinned
-           to the bottom-left of the FOV as the headset turns. Hidden on
-           desktop by the vr-only component; desktop uses the HTML #hud. -->
-      <a-entity id="vrHud" vr-only
-        position="-0.26 -0.18 -0.6"
-        rotation="0 0 0">
-        <a-plane width="0.22" height="0.07"
-          material="color:#000; opacity:0.68; transparent:true; shader:flat"></a-plane>
-        <a-text id="vrHudLine1"
-          value="L-stick walk   R-stick turn"
-          align="center" color="#ffd680" width="0.40"
-          position="0 0.012 0.001"
-          wrap-count="34"></a-text>
-        <a-text id="vrHudLine2"
-          value="A open door"
-          align="center" color="#d9cfba" width="0.40"
-          position="0 -0.014 0.001"
-          wrap-count="34"></a-text>
-      </a-entity>
     </a-camera>
 
     <!-- VR hand controllers — laser pointers that can click portal doors with the trigger -->
