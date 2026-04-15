@@ -8,6 +8,15 @@
 
   <script>
     // ═══════════════════════════════════════════════════════════
+    //  GLOBAL STATE FLAGS
+    // ═══════════════════════════════════════════════════════════
+    // Player is locked in place during the cinematic flyover + chess
+    // sequence. The stone-reveal dolly flips this true once it finishes
+    // (~12s after revealStoneChamber()), at which point both VR thumbstick
+    // movement AND desktop wasd-controls become responsive.
+    window.__chamberReady = false;
+
+    // ═══════════════════════════════════════════════════════════
     //  COMPONENTS
     // ═══════════════════════════════════════════════════════════
 
@@ -113,6 +122,9 @@
         var session = sceneEl.xrSession || (sceneEl.renderer && sceneEl.renderer.xr && sceneEl.renderer.xr.getSession && sceneEl.renderer.xr.getSession());
         if (!session || !session.inputSources) return;
         if (this.el.components.flyover && this.el.components.flyover.active) return;  // don't fight the flyover
+        // Lock the user in place until the chamber is revealed and the stone-reveal
+        // dolly completes — they should watch the chess cinematic + captions first.
+        if (!window.__chamberReady) return;
 
         var dts = Math.min(0.1, (dt || 16) / 1000);
         var dead = this.data.deadzone;
@@ -1264,6 +1276,20 @@
         var z0 = -6, z1 = 12;
         rig.object3D.position.z = z0 + (z1 - z0) * ease;
         rig.object3D.position.y = 1.6 + Math.sin(p * Math.PI) * 0.3;
+        // Hand control back to the player as soon as the dolly completes.
+        // Without this, every subsequent tick keeps re-writing position.z
+        // and position.y, which felt like invisible walls in the chamber.
+        if (p >= 1) {
+          this._active = false;
+          window.__chamberReady = true;
+          // Update the in-scene VR HUD to the full controls list now that
+          // the player can move.
+          var vrText = document.getElementById('vrHudText');
+          if (vrText) {
+            vrText.setAttribute('value',
+              'L-stick walk  •  R-stick turn  •  A open door / tour trophies  •  L-stick L/R cycle waypoints');
+          }
+        }
       }
     });
 
@@ -1816,6 +1842,27 @@
         material="color: #ffd080; shader: flat; opacity: 0.55"
         geometry="primitive: ring; radiusInner: 0.008; radiusOuter: 0.012"
         position="0 0 -1"></a-cursor>
+
+      <!-- 3D HUD — a small instructions panel parented to the camera so it
+           always sits just below the centre of the view. Visible in both
+           VR and desktop (unless desktop prefers the bottom-left HTML HUD,
+           in which case we can hide it on scenes.is('vr-mode') check).
+           Positioned at -0.42 y, -0.9 z → bottom of the FOV, close enough
+           to read but not blocking the scene. -->
+      <a-entity id="vrHud"
+        position="0 -0.42 -0.9"
+        rotation="-24 0 0"
+        visible="true">
+        <a-plane width="0.82" height="0.22"
+          material="color:#000; opacity:0.62; transparent:true; shader:flat"
+          position="0 0 0"></a-plane>
+        <a-text id="vrHudText"
+          value="Watch the match — controls unlock in the chamber"
+          align="center" color="#ffd680" width="1.5"
+          position="0 0 0.01"
+          wrap-count="44"
+          font="https://cdn.aframe.io/fonts/Exo2Bold.fnt"></a-text>
+      </a-entity>
     </a-camera>
 
     <!-- VR hand controllers — laser pointers that can click portal doors with the trigger -->
