@@ -2276,6 +2276,22 @@
     sfApi = null; sfAnnotations = 0; sfAnnotationIdx = -1;
     setTimeout(function(){ iframe.src = 'about:blank'; }, 900);
     document.dispatchEvent(new CustomEvent('portal-closed'));
+
+    // Teleport the player back to the centre of the chamber, facing the
+    // stone + mirror. This avoids re-spawning them right next to the door
+    // they just came back through (which would auto-re-trigger it) or
+    // leaving them clipping through a wall.
+    var rig = document.getElementById('rig');
+    if (rig) {
+      rig.object3D.position.set(0, 1.6, 5);
+      var m = new THREE.Matrix4();
+      m.lookAt(
+        new THREE.Vector3(0, 1.6, 5),
+        new THREE.Vector3(0, 2.0, 17.8),   // ruby stone position
+        new THREE.Vector3(0, 1, 0)
+      );
+      rig.object3D.quaternion.setFromRotationMatrix(m);
+    }
   });
 
   // Keyboard: left / right arrow cycle annotations while the portal is open
